@@ -1,0 +1,55 @@
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+*.iml
+
+# Generated
+lib/generated_plugin_registrant.dart
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+
+# iOS / Xcode
+ios/Pods/
+ios/.symlinks/
+ios/Runner.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings
+ios/Flutter/Flutter.framework/
+ios/Flutter/Flutter.podspec
+*.xcworkspace/xcuserdata
+*.xcodeproj/xcuserdata
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+DerivedData/
+*.moved-aside
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code
+.vscode/
+
+# Sensitive files
+*.keystore
+*.jks
+*.p8
+*.p12
+*.mobileprovision
