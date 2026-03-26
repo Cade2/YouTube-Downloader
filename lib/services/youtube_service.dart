@@ -1,7 +1,10 @@
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:ffmpeg_kit_flutter_new/ffmpeg_kit.dart';
+import 'package:ffmpeg_kit_flutter_new/return_code.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:photo_manager/photo_manager.dart';
@@ -27,18 +30,21 @@ class DownloadProgress {
     required this.speedInMegabytes,
     required this.receivedBytes,
     required this.totalBytes,
+    this.stageLabel = 'Preparing download...',
   });
 
   const DownloadProgress.zero()
     : progress = 0,
       speedInMegabytes = 0,
       receivedBytes = 0,
-      totalBytes = 0;
+      totalBytes = 0,
+      stageLabel = 'Preparing download...';
 
   final double progress;
   final double speedInMegabytes;
   final int receivedBytes;
   final int totalBytes;
+  final String stageLabel;
 
   String get percentLabel =>
       '${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%';
@@ -138,7 +144,7 @@ class YouTubeService {
     required MediaFormat format,
     required void Function(DownloadProgress progress) onProgress,
   }) async {
-    File? temporaryFile;
+    Directory? workingDirectory;
 
     try {
       if (format == MediaFormat.mp4) {
@@ -147,65 +153,27 @@ class YouTubeService {
 
       final temporaryDirectory = await getTemporaryDirectory();
       final safeName = _sanitizeFileName(videoInfo.title);
-      final fileName =
-          '${safeName}_${DateTime.now().millisecondsSinceEpoch}.${option.fileExtension}';
-      temporaryFile = File('${temporaryDirectory.path}/$fileName');
-
-      final speedTracker = _SpeedTracker();
-      final fallbackTotal = option.streamInfo.size.totalBytes;
-
-      await _dio.downloadUri(
-        Uri.parse(option.streamInfo.url.toString()),
-        temporaryFile.path,
-        deleteOnError: true,
-        onReceiveProgress: (received, total) {
-          final expectedTotal = total > 0 ? total : fallbackTotal;
-          final progress = expectedTotal > 0 ? received / expectedTotal : 0.0;
-
-          onProgress(
-            DownloadProgress(
-              progress: progress.clamp(0, 1),
-              speedInMegabytes: speedTracker.sample(received),
-              receivedBytes: received,
-              totalBytes: expectedTotal,
-            ),
-          );
-        },
-        options: Options(
-          followRedirects: true,
-          validateStatus: (status) => status != null && status < 500,
-        ),
-      );
-
-      onProgress(
-        DownloadProgress(
-          progress: 1,
-          speedInMegabytes: speedTracker.lastSpeed,
-          receivedBytes: option.streamInfo.size.totalBytes,
-          totalBytes: option.streamInfo.size.totalBytes,
-        ),
-      );
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final baseFileStem = '${safeName}_$timestamp';
+      workingDirectory = await Directory(
+        '${temporaryDirectory.path}/pulltube_$timestamp',
+      ).create(recursive: true);
 
       if (format == MediaFormat.mp4) {
-        await PhotoManager.editor.saveVideo(temporaryFile, title: fileName);
-
-        await temporaryFile.delete();
-        return const DownloadResult(savedToGallery: true);
+        return _downloadVideoSelection(
+          videoInfo: videoInfo,
+          option: option,
+          workingDirectory: workingDirectory,
+          baseFileStem: baseFileStem,
+          onProgress: onProgress,
+        );
       }
 
-      final documentsDirectory = await getApplicationDocumentsDirectory();
-      final savedFile = File('${documentsDirectory.path}/$fileName');
-
-      if (await savedFile.exists()) {
-        await savedFile.delete();
-      }
-
-      final persistedFile = await temporaryFile.copy(savedFile.path);
-      await temporaryFile.delete();
-
-      return DownloadResult(
-        savedToGallery: false,
-        filePath: persistedFile.path,
+      return _downloadAudioSelection(
+        option: option,
+        workingDirectory: workingDirectory,
+        baseFileStem: baseFileStem,
+        onProgress: onProgress,
       );
     } on DioException catch (error) {
       throw YouTubeServiceException(_mapDioException(error));
@@ -213,12 +181,517 @@ class YouTubeService {
       rethrow;
     } on FileSystemException catch (error) {
       throw YouTubeServiceException('File saving failed: ${error.message}');
-    } catch (error) {
-      throw YouTubeServiceException('Download failed unexpectedly: $error');
+    } on PlatformException catch (error, stackTrace) {
+      debugPrint(
+        '[PullTube] platform exception during download flow: '
+        '${error.code} | ${error.message} | ${error.details}',
+      );
+      debugPrintStack(stackTrace: stackTrace);
+      throw const YouTubeServiceException(
+        'Couldn\'t complete the download on iPhone right now.',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[PullTube] unexpected download error: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      throw const YouTubeServiceException('Download failed unexpectedly.');
     } finally {
-      if (temporaryFile != null && await temporaryFile.exists()) {
-        await temporaryFile.delete();
+      await _deleteDirectoryQuietly(workingDirectory);
+    }
+  }
+
+  Future<DownloadResult> _downloadAudioSelection({
+    required StreamOption option,
+    required Directory workingDirectory,
+    required String baseFileStem,
+    required void Function(DownloadProgress progress) onProgress,
+  }) async {
+    final fileName = '$baseFileStem.${option.fileExtension}';
+    final temporaryFile = File('${workingDirectory.path}/$fileName');
+    final totalBytes = _streamSize(option.streamInfo);
+
+    await _downloadStreamToFile(
+      streamInfo: option.streamInfo,
+      destination: temporaryFile,
+      stageLabel: 'Downloading audio...',
+      startProgress: 0,
+      endProgress: 0.92,
+      baseReceivedBytes: 0,
+      totalBytes: totalBytes,
+      onProgress: onProgress,
+    );
+
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: 'Saving into Files...',
+      progress: 0.97,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    final documentsDirectory = await getApplicationDocumentsDirectory();
+    final savedFile = File('${documentsDirectory.path}/$fileName');
+
+    if (await savedFile.exists()) {
+      await savedFile.delete();
+    }
+
+    final persistedFile = await temporaryFile.copy(savedFile.path);
+
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: 'Saved into Files',
+      progress: 1,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    return DownloadResult(savedToGallery: false, filePath: persistedFile.path);
+  }
+
+  Future<DownloadResult> _downloadVideoSelection({
+    required VideoInfo videoInfo,
+    required StreamOption option,
+    required Directory workingDirectory,
+    required String baseFileStem,
+    required void Function(DownloadProgress progress) onProgress,
+  }) async {
+    final galleryFileName = '$baseFileStem.mp4';
+
+    if (option.streamInfo case final MuxedStreamInfo selectedStream) {
+      _logSelectedVideoStream(
+        option: option,
+        streamKind: 'muxed',
+        container: selectedStream.container.name,
+        videoCodec: selectedStream.videoCodec,
+        audioCodec: selectedStream.audioCodec,
+        sizeInBytes: selectedStream.size.totalBytes,
+      );
+
+      final totalBytes = _streamSize(selectedStream);
+      final downloadedFile = File(
+        '${workingDirectory.path}/$baseFileStem.${option.fileExtension}',
+      );
+
+      debugPrint('[PullTube] temp video path: ${downloadedFile.path}');
+
+      await _downloadStreamToFile(
+        streamInfo: selectedStream,
+        destination: downloadedFile,
+        stageLabel: 'Downloading video with audio...',
+        startProgress: 0,
+        endProgress: 0.9,
+        baseReceivedBytes: 0,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+      );
+
+      File finalFile = downloadedFile;
+      final needsFinalization =
+          !option.isGalleryCompatible ||
+          !_isMp4FriendlyVideoCodec(selectedStream.videoCodec) ||
+          !_isMp4FriendlyAudioCodec(selectedStream.audioCodec);
+
+      if (needsFinalization) {
+        final finalizedFile = File('${workingDirectory.path}/$galleryFileName');
+        debugPrint('[PullTube] final merged file path: ${finalizedFile.path}');
+
+        finalFile = await _finalizeMuxedVideoAsMp4(
+          sourceFile: downloadedFile,
+          outputFile: finalizedFile,
+          stageLabel: 'Finalizing MP4 file...',
+          totalBytes: totalBytes,
+          onProgress: onProgress,
+          videoCodec: selectedStream.videoCodec,
+          audioCodec: selectedStream.audioCodec,
+        );
       }
+
+      await _saveVideoToPhotoLibrary(
+        file: finalFile,
+        title: galleryFileName,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+      );
+
+      return const DownloadResult(savedToGallery: true);
+    }
+
+    if (option.streamInfo case final VideoOnlyStreamInfo selectedVideoStream) {
+      _logSelectedVideoStream(
+        option: option,
+        streamKind: 'video-only',
+        container: selectedVideoStream.container.name,
+        videoCodec: selectedVideoStream.videoCodec,
+        audioCodec: null,
+        sizeInBytes: selectedVideoStream.size.totalBytes,
+      );
+
+      final manifest = await _youtube.videos.streamsClient.getManifest(
+        videoInfo.id,
+      );
+      final selectedAudioStream = _selectBestAudioStream(manifest.audioOnly);
+
+      if (selectedAudioStream == null) {
+        throw const YouTubeServiceException(
+          'Couldn\'t find an audio stream to pair with this video quality.',
+        );
+      }
+
+      _logSelectedAudioStream(selectedAudioStream);
+
+      final videoBytes = _streamSize(selectedVideoStream);
+      final audioBytes = _streamSize(selectedAudioStream);
+      final totalBytes = videoBytes + audioBytes;
+
+      final videoFile = File(
+        '${workingDirectory.path}/${baseFileStem}_video.${option.fileExtension}',
+      );
+      final audioFile = File(
+        '${workingDirectory.path}/${baseFileStem}_audio.'
+        '${_audioFileExtension(selectedAudioStream)}',
+      );
+      final mergedFile = File('${workingDirectory.path}/$galleryFileName');
+
+      debugPrint('[PullTube] temp video path: ${videoFile.path}');
+      debugPrint('[PullTube] temp audio path: ${audioFile.path}');
+      debugPrint('[PullTube] final merged file path: ${mergedFile.path}');
+
+      await _downloadStreamToFile(
+        streamInfo: selectedVideoStream,
+        destination: videoFile,
+        stageLabel: 'Downloading high-quality video...',
+        startProgress: 0,
+        endProgress: 0.68,
+        baseReceivedBytes: 0,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+      );
+
+      await _downloadStreamToFile(
+        streamInfo: selectedAudioStream,
+        destination: audioFile,
+        stageLabel: 'Downloading companion audio...',
+        startProgress: 0.68,
+        endProgress: 0.86,
+        baseReceivedBytes: videoBytes,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+      );
+
+      final finalizedFile = await _mergeVideoAndAudioAsMp4(
+        videoFile: videoFile,
+        audioFile: audioFile,
+        outputFile: mergedFile,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+        videoCodec: selectedVideoStream.videoCodec,
+        audioCodec: selectedAudioStream.audioCodec,
+      );
+
+      await _saveVideoToPhotoLibrary(
+        file: finalizedFile,
+        title: galleryFileName,
+        totalBytes: totalBytes,
+        onProgress: onProgress,
+      );
+
+      return const DownloadResult(savedToGallery: true);
+    }
+
+    throw const YouTubeServiceException(
+      'This video stream could not be prepared for MP4 download.',
+    );
+  }
+
+  Future<void> _downloadStreamToFile({
+    required StreamInfo streamInfo,
+    required File destination,
+    required String stageLabel,
+    required double startProgress,
+    required double endProgress,
+    required int baseReceivedBytes,
+    required int totalBytes,
+    required void Function(DownloadProgress progress) onProgress,
+  }) async {
+    final speedTracker = _SpeedTracker();
+    final fallbackTotal = _streamSize(streamInfo);
+
+    await _dio.downloadUri(
+      streamInfo.url,
+      destination.path,
+      deleteOnError: true,
+      onReceiveProgress: (received, total) {
+        final streamTotal = total > 0 ? total : fallbackTotal;
+        final stageProgress = streamTotal > 0 ? received / streamTotal : 0.0;
+        final overallProgress =
+            startProgress + ((endProgress - startProgress) * stageProgress);
+
+        _emitProgress(
+          onProgress: onProgress,
+          stageLabel: stageLabel,
+          progress: overallProgress,
+          speedInMegabytes: speedTracker.sample(received),
+          receivedBytes: _boundedBytes(
+            baseReceivedBytes + received,
+            totalBytes,
+          ),
+          totalBytes: totalBytes,
+        );
+      },
+      options: Options(
+        followRedirects: true,
+        validateStatus: (status) =>
+            status != null && status >= 200 && status < 400,
+      ),
+    );
+
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: stageLabel,
+      progress: endProgress,
+      speedInMegabytes: speedTracker.lastSpeed,
+      receivedBytes: _boundedBytes(
+        baseReceivedBytes + fallbackTotal,
+        totalBytes,
+      ),
+      totalBytes: totalBytes,
+    );
+  }
+
+  Future<File> _mergeVideoAndAudioAsMp4({
+    required File videoFile,
+    required File audioFile,
+    required File outputFile,
+    required int totalBytes,
+    required void Function(DownloadProgress progress) onProgress,
+    required String videoCodec,
+    required String audioCodec,
+  }) async {
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: 'Merging audio and video...',
+      progress: 0.9,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    final shouldCopy =
+        _isMp4FriendlyVideoCodec(videoCodec) &&
+        _isMp4FriendlyAudioCodec(audioCodec);
+
+    if (shouldCopy) {
+      final mergedWithCopy = await _runFfmpegCommand(
+        command:
+            '-y -i ${_quotePath(videoFile.path)} '
+            '-i ${_quotePath(audioFile.path)} '
+            '-map 0:v:0 -map 1:a:0 '
+            '-c:v copy -c:a copy -shortest -movflags +faststart '
+            '${_quotePath(outputFile.path)}',
+        logLabel: 'mux command',
+        failureMessage: 'Couldn\'t merge audio and video.',
+        allowFallback: true,
+      );
+
+      if (mergedWithCopy && await _hasUsableFile(outputFile)) {
+        _emitProgress(
+          onProgress: onProgress,
+          stageLabel: 'Merged audio and video',
+          progress: 0.97,
+          speedInMegabytes: 0,
+          receivedBytes: totalBytes,
+          totalBytes: totalBytes,
+        );
+        return outputFile;
+      }
+    }
+
+    if (await outputFile.exists()) {
+      await outputFile.delete();
+    }
+
+    final transcoded = await _runFfmpegCommand(
+      command:
+          '-y -i ${_quotePath(videoFile.path)} '
+          '-i ${_quotePath(audioFile.path)} '
+          '-map 0:v:0 -map 1:a:0 '
+          '-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p '
+          '-c:a aac -b:a 192k -shortest -movflags +faststart '
+          '${_quotePath(outputFile.path)}',
+      logLabel: 'merge fallback command',
+      failureMessage: 'Couldn\'t merge audio and video.',
+    );
+
+    if (!transcoded || !await _hasUsableFile(outputFile)) {
+      throw const YouTubeServiceException('Couldn\'t merge audio and video.');
+    }
+
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: 'Merged audio and video',
+      progress: 0.97,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    return outputFile;
+  }
+
+  Future<File> _finalizeMuxedVideoAsMp4({
+    required File sourceFile,
+    required File outputFile,
+    required String stageLabel,
+    required int totalBytes,
+    required void Function(DownloadProgress progress) onProgress,
+    required String videoCodec,
+    required String audioCodec,
+  }) async {
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: stageLabel,
+      progress: 0.94,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    final shouldCopy =
+        _isMp4FriendlyVideoCodec(videoCodec) &&
+        _isMp4FriendlyAudioCodec(audioCodec);
+
+    if (shouldCopy) {
+      final remuxed = await _runFfmpegCommand(
+        command:
+            '-y -i ${_quotePath(sourceFile.path)} '
+            '-c:v copy -c:a copy -movflags +faststart '
+            '${_quotePath(outputFile.path)}',
+        logLabel: 'mux command',
+        failureMessage: 'Couldn\'t finalize the video file before saving.',
+        allowFallback: true,
+      );
+
+      if (remuxed && await _hasUsableFile(outputFile)) {
+        return outputFile;
+      }
+    }
+
+    if (await outputFile.exists()) {
+      await outputFile.delete();
+    }
+
+    final transcoded = await _runFfmpegCommand(
+      command:
+          '-y -i ${_quotePath(sourceFile.path)} '
+          '-c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p '
+          '-c:a aac -b:a 192k -movflags +faststart '
+          '${_quotePath(outputFile.path)}',
+      logLabel: 'finalize fallback command',
+      failureMessage: 'Couldn\'t finalize the video file before saving.',
+    );
+
+    if (!transcoded || !await _hasUsableFile(outputFile)) {
+      throw const YouTubeServiceException(
+        'Couldn\'t finalize the video file before saving.',
+      );
+    }
+
+    return outputFile;
+  }
+
+  Future<bool> _runFfmpegCommand({
+    required String command,
+    required String logLabel,
+    required String failureMessage,
+    bool allowFallback = false,
+  }) async {
+    debugPrint('[PullTube] $logLabel: $command');
+
+    final session = await FFmpegKit.execute(command);
+    final returnCode = await session.getReturnCode();
+    final output = await session.getOutput();
+    final logs = await session.getLogsAsString();
+    final failStackTrace = await session.getFailStackTrace();
+
+    debugPrint('[PullTube] merge result code: ${returnCode?.getValue()}');
+    if (output != null && output.isNotEmpty) {
+      debugPrint('[PullTube] merge output: $output');
+    }
+    if (logs.isNotEmpty) {
+      debugPrint('[PullTube] merge logs: $logs');
+    }
+    if (failStackTrace != null && failStackTrace.isNotEmpty) {
+      debugPrint('[PullTube] merge stack trace: $failStackTrace');
+    }
+
+    if (ReturnCode.isSuccess(returnCode)) {
+      return true;
+    }
+
+    if (allowFallback) {
+      return false;
+    }
+
+    throw YouTubeServiceException(failureMessage);
+  }
+
+  Future<void> _saveVideoToPhotoLibrary({
+    required File file,
+    required String title,
+    required int totalBytes,
+    required void Function(DownloadProgress progress) onProgress,
+  }) async {
+    if (!await _hasUsableFile(file)) {
+      throw const YouTubeServiceException(
+        'Couldn\'t finalize the video file before saving.',
+      );
+    }
+
+    _emitProgress(
+      onProgress: onProgress,
+      stageLabel: 'Saving into Photo Library...',
+      progress: 0.99,
+      speedInMegabytes: 0,
+      receivedBytes: totalBytes,
+      totalBytes: totalBytes,
+    );
+
+    debugPrint('[PullTube] save attempt path: ${file.path}');
+    debugPrint('[PullTube] final save result: attempting title=$title');
+
+    try {
+      final asset = await PhotoManager.editor.saveVideo(file, title: title);
+      debugPrint(
+        '[PullTube] final save result: success '
+        'assetId=${asset.id} '
+        'title=${asset.title}',
+      );
+
+      _emitProgress(
+        onProgress: onProgress,
+        stageLabel: 'Saved into Photo Library',
+        progress: 1,
+        speedInMegabytes: 0,
+        receivedBytes: totalBytes,
+        totalBytes: totalBytes,
+      );
+    } on PlatformException catch (error, stackTrace) {
+      debugPrint(
+        '[PullTube] final save result: platform failure '
+        '${error.code} | ${error.message} | ${error.details}',
+      );
+      debugPrintStack(stackTrace: stackTrace);
+      throw const YouTubeServiceException(
+        'Couldn\'t save to Photos. Please allow photo access in Settings.',
+      );
+    } catch (error, stackTrace) {
+      debugPrint('[PullTube] final save result: failure $error');
+      debugPrintStack(stackTrace: stackTrace);
+      throw const YouTubeServiceException(
+        'Couldn\'t save to Photos. Please allow photo access in Settings.',
+      );
     }
   }
 
@@ -227,29 +700,88 @@ class YouTubeService {
       return;
     }
 
-    final addOnlyStatus = await Permission.photosAddOnly.request();
-    final hasPermission = addOnlyStatus.isGranted || addOnlyStatus.isLimited;
+    var addOnlyStatus = await Permission.photosAddOnly.status;
+    var fullStatus = await Permission.photos.status;
 
-    if (!hasPermission) {
-      final photosStatus = await Permission.photos.request();
-      final isGranted = photosStatus.isGranted || photosStatus.isLimited;
-      if (!isGranted) {
-        throw const YouTubeServiceException(
-          'Photo Library permission was denied. Allow access before saving video.',
+    debugPrint(
+      '[PullTube] photo permission status before request: '
+      'addOnly=$addOnlyStatus | full=$fullStatus',
+    );
+
+    if (!_hasWritablePhotoPermission(addOnlyStatus, fullStatus)) {
+      addOnlyStatus = await Permission.photosAddOnly.request();
+      fullStatus = await Permission.photos.status;
+
+      debugPrint(
+        '[PullTube] photo permission status after add-only request: '
+        'addOnly=$addOnlyStatus | full=$fullStatus',
+      );
+    }
+
+    final photoManagerState = await PhotoManager.requestPermissionExtend(
+      requestOption: const PermissionRequestOption(
+        iosAccessLevel: IosAccessLevel.addOnly,
+      ),
+    );
+
+    debugPrint(
+      '[PullTube] photo_manager add-only permission state: $photoManagerState',
+    );
+    debugPrint(
+      '[PullTube] photo access resolved: '
+      'addOnlyGranted=${_isGrantedPermission(addOnlyStatus)} '
+      '| fullGranted=${_isGrantedPermission(fullStatus)} '
+      '| photoManagerAuthorized=${_isAuthorizedPhotoState(photoManagerState)}',
+    );
+
+    final hasWritableAccess =
+        _hasWritablePhotoPermission(addOnlyStatus, fullStatus) ||
+        _isAuthorizedPhotoState(photoManagerState);
+
+    if (!hasWritableAccess) {
+      throw const YouTubeServiceException(
+        'Couldn\'t save to Photos. Please allow photo access in Settings.',
+      );
+    }
+  }
+
+  AudioOnlyStreamInfo? _selectBestAudioStream(
+    Iterable<AudioOnlyStreamInfo> streams,
+  ) {
+    final sorted = streams.toList()
+      ..sort((left, right) {
+        final scoreDelta =
+            _audioPreferenceScore(right) - _audioPreferenceScore(left);
+        if (scoreDelta != 0) {
+          return scoreDelta;
+        }
+        return right.bitrate.bitsPerSecond.compareTo(
+          left.bitrate.bitsPerSecond,
         );
+      });
+
+    return sorted.isEmpty ? null : sorted.first;
+  }
+
+  int _audioPreferenceScore(AudioOnlyStreamInfo stream) {
+    final codec = stream.audioCodec.toLowerCase();
+    final container = stream.container.name.toLowerCase();
+    var score = stream.bitrate.bitsPerSecond;
+
+    if (container == 'mp4') {
+      score += 2 * 1000 * 1000;
+    }
+    if (codec.contains('mp4a') || codec.contains('aac')) {
+      score += 1000 * 1000;
+    }
+    if (stream.audioTrack?.displayName case final displayName?) {
+      final normalized = displayName.toLowerCase();
+      if (normalized.contains('english') || normalized.contains('original')) {
+        score += 250 * 1000;
       }
     }
 
-    final photoManagerState = await PhotoManager.requestPermissionExtend();
-    final isAuthorized =
-        photoManagerState == PermissionState.authorized ||
-        photoManagerState == PermissionState.limited;
-
-    if (!isAuthorized) {
-      throw const YouTubeServiceException(
-        'Photo Library access is still unavailable for gallery saving.',
-      );
-    }
+    return score;
   }
 
   List<StreamOption> _buildVideoOptions(StreamManifest manifest) {
@@ -307,9 +839,7 @@ class YouTubeService {
 
     for (final stream in manifest.audioOnly) {
       final bitrate = stream.bitrate.kiloBitsPerSecond.round();
-      final fileExtension = stream.container.name == 'mp4'
-          ? 'm4a'
-          : stream.container.name;
+      final fileExtension = _audioFileExtension(stream);
       final candidate = StreamOption(
         label: '$bitrate kbps',
         detail: '${stream.container.name.toUpperCase()}  -  Audio only',
@@ -393,9 +923,125 @@ class YouTubeService {
     return sanitized.length > 64 ? sanitized.substring(0, 64) : sanitized;
   }
 
+  int _streamSize(StreamInfo streamInfo) => streamInfo.size.totalBytes;
+
+  int _boundedBytes(int value, int totalBytes) {
+    if (totalBytes <= 0) {
+      return value;
+    }
+    return value.clamp(0, totalBytes).toInt();
+  }
+
+  String _audioFileExtension(AudioOnlyStreamInfo stream) =>
+      stream.container.name == 'mp4' ? 'm4a' : stream.container.name;
+
+  bool _hasWritablePhotoPermission(
+    PermissionStatus addOnlyStatus,
+    PermissionStatus fullStatus,
+  ) {
+    return _isGrantedPermission(addOnlyStatus) ||
+        _isGrantedPermission(fullStatus);
+  }
+
+  bool _isGrantedPermission(PermissionStatus status) =>
+      status.isGranted || status.isLimited;
+
+  bool _isAuthorizedPhotoState(PermissionState state) =>
+      state == PermissionState.authorized || state == PermissionState.limited;
+
+  bool _isMp4FriendlyVideoCodec(String codec) {
+    final normalized = codec.toLowerCase();
+    return normalized.contains('avc1') ||
+        normalized.contains('h264') ||
+        normalized.contains('hev1') ||
+        normalized.contains('hvc1') ||
+        normalized.contains('mp4v');
+  }
+
+  bool _isMp4FriendlyAudioCodec(String codec) {
+    final normalized = codec.toLowerCase();
+    return normalized.contains('mp4a') ||
+        normalized.contains('aac') ||
+        normalized.contains('alac');
+  }
+
+  String _quotePath(String path) => '"${path.replaceAll('"', '\\"')}"';
+
+  Future<bool> _hasUsableFile(File file) async {
+    if (!await file.exists()) {
+      return false;
+    }
+    return await file.length() > 0;
+  }
+
+  Future<void> _deleteDirectoryQuietly(Directory? directory) async {
+    if (directory == null) {
+      return;
+    }
+    if (!await directory.exists()) {
+      return;
+    }
+
+    try {
+      await directory.delete(recursive: true);
+    } catch (error) {
+      debugPrint('[PullTube] cleanup skipped: $error');
+    }
+  }
+
+  void _emitProgress({
+    required void Function(DownloadProgress progress) onProgress,
+    required String stageLabel,
+    required double progress,
+    required double speedInMegabytes,
+    required int receivedBytes,
+    required int totalBytes,
+  }) {
+    onProgress(
+      DownloadProgress(
+        progress: progress.clamp(0.0, 1.0).toDouble(),
+        speedInMegabytes: speedInMegabytes,
+        receivedBytes: receivedBytes,
+        totalBytes: totalBytes,
+        stageLabel: stageLabel,
+      ),
+    );
+  }
+
   void _logVideoHeader(VideoInfo videoInfo) {
     debugPrint('[PullTube] video id: ${videoInfo.id}');
     debugPrint('[PullTube] video title: ${videoInfo.title}');
+  }
+
+  void _logSelectedVideoStream({
+    required StreamOption option,
+    required String streamKind,
+    required String container,
+    required String videoCodec,
+    required String? audioCodec,
+    required int sizeInBytes,
+  }) {
+    debugPrint(
+      '[PullTube] selected video stream: '
+      '${option.label} | $streamKind | $container | '
+      'videoCodec=$videoCodec | '
+      'audioCodec=${audioCodec ?? 'none'} | '
+      '${(sizeInBytes / (1024 * 1024)).toStringAsFixed(1)} MB',
+    );
+    debugPrint(
+      '[PullTube] selected stream has audio: ${option.hasAudio} '
+      '| is muxed: ${option.isMuxed}',
+    );
+  }
+
+  void _logSelectedAudioStream(AudioOnlyStreamInfo stream) {
+    debugPrint(
+      '[PullTube] selected audio stream: '
+      '${stream.bitrate.kiloBitsPerSecond.round()} kbps | '
+      '${stream.container.name} | '
+      'audioCodec=${stream.audioCodec} | '
+      '${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
+    );
   }
 
   void _logMuxedStreams(Iterable<MuxedStreamInfo> streams) {
@@ -404,6 +1050,8 @@ class YouTubeService {
       debugPrint(
         '[PullTube]   muxed ${stream.videoResolution.height}p'
         ' | ${stream.container.name}'
+        ' | videoCodec=${stream.videoCodec}'
+        ' | audioCodec=${stream.audioCodec}'
         ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
       );
     }
@@ -415,6 +1063,7 @@ class YouTubeService {
       debugPrint(
         '[PullTube]   videoOnly ${stream.videoResolution.height}p'
         ' | ${stream.container.name}'
+        ' | videoCodec=${stream.videoCodec}'
         ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
       );
     }
@@ -426,6 +1075,7 @@ class YouTubeService {
       debugPrint(
         '[PullTube]   audioOnly ${stream.bitrate.kiloBitsPerSecond.round()} kbps'
         ' | ${stream.container.name}'
+        ' | audioCodec=${stream.audioCodec}'
         ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
       );
     }

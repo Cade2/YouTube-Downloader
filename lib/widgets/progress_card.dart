@@ -55,6 +55,15 @@ class ProgressCard extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 10),
+          Text(
+            progress.stageLabel,
+            style: const TextStyle(
+              color: PullTubeColors.textSecondary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
           const SizedBox(height: 16),
           TweenAnimationBuilder<double>(
             tween: Tween<double>(begin: 0, end: progress.progress),

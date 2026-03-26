@@ -824,7 +824,7 @@ class _HomeScreenState extends State<HomeScreen>
         border: Border.all(color: PullTubeColors.borderStrong),
       ),
       child: const Text(
-        'Higher resolutions can appear as video-only because YouTube does not always expose a muxed stream at every height.',
+        'Higher resolutions can appear as video-only because YouTube does not always expose a muxed stream at every height. PullTube will pair those selections with audio before saving.',
         style: TextStyle(color: PullTubeColors.textSecondary, height: 1.45),
       ),
     );
