@@ -1,126 +1,147 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../main.dart';
 import '../models/video_info.dart';
-import 'format_toggle.dart';
 
 class QualityDropdown extends StatelessWidget {
-  final List<StreamOption> options;
-  final StreamOption? selected;
-  final ValueChanged<StreamOption> onChanged;
-  final MediaFormat format;
-
   const QualityDropdown({
     super.key,
     required this.options,
     required this.selected,
-    required this.onChanged,
     required this.format,
+    required this.enabled,
+    required this.onChanged,
   });
+
+  final List<StreamOption> options;
+  final StreamOption? selected;
+  final MediaFormat format;
+  final bool enabled;
+  final ValueChanged<StreamOption?> onChanged;
 
   @override
   Widget build(BuildContext context) {
     final isAudio = format == MediaFormat.mp3;
-    final accent = isAudio ? AppColors.accentAudio : AppColors.accent;
-    final labelText = isAudio ? 'Bitrate' : 'Quality';
+    final accent = isAudio
+        ? PullTubeColors.audioAccent
+        : PullTubeColors.videoAccent;
+    final activeOption = selected ?? (options.isEmpty ? null : options.first);
 
-    if (options.isEmpty) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: PullTubeColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isAudio ? Icons.equalizer_rounded : Icons.high_quality_rounded,
+                color: accent,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                format.selectionLabel,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          DropdownButtonFormField<StreamOption>(
+            initialValue: activeOption,
+            items: options
+                .map(
+                  (option) => DropdownMenuItem<StreamOption>(
+                    value: option,
+                    child: _DropdownOptionTile(option: option),
+                  ),
+                )
+                .toList(),
+            onChanged: enabled ? onChanged : null,
+            isExpanded: true,
+            borderRadius: BorderRadius.circular(20),
+            dropdownColor: PullTubeColors.surfaceSecondary,
+            menuMaxHeight: 320,
+            decoration: InputDecoration(
+              filled: true,
+              fillColor: PullTubeColors.surfaceSecondary,
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(18),
+                borderSide: BorderSide(color: accent.withValues(alpha: 0.25)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(18),
+                borderSide: BorderSide(color: accent, width: 1.2),
+              ),
+            ),
+            icon: Icon(Icons.keyboard_arrow_down_rounded, color: accent),
+            selectedItemBuilder: (context) {
+              return options
+                  .map(
+                    (option) => Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        option.label,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList();
+            },
+          ),
+          if (activeOption != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 12),
+              child: Text(
+                activeOption.detail,
+                style: const TextStyle(
+                  color: PullTubeColors.textSecondary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
 
+class _DropdownOptionTile extends StatelessWidget {
+  const _DropdownOptionTile({required this.option});
+
+  final StreamOption option;
+
+  @override
+  Widget build(BuildContext context) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          labelText,
-          style: GoogleFonts.dmSans(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: AppColors.textSecondary,
-            letterSpacing: 0.8,
+          option.label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w800,
           ),
         ),
-        const SizedBox(height: 8),
-        Container(
-          decoration: BoxDecoration(
-            color: AppColors.card,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: AppColors.border),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<StreamOption>(
-              value: selected,
-              isExpanded: true,
-              dropdownColor: AppColors.cardElevated,
-              borderRadius: BorderRadius.circular(14),
-              icon: Icon(
-                Icons.keyboard_arrow_down_rounded,
-                color: accent,
-              ),
-              items: options.map((option) {
-                final isSelected = option.label == selected?.label;
-                return DropdownMenuItem<StreamOption>(
-                  value: option,
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: isSelected ? accent : AppColors.textMuted,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Text(
-                        option.label,
-                        style: GoogleFonts.dmSans(
-                          fontSize: 15,
-                          fontWeight:
-                              isSelected ? FontWeight.w700 : FontWeight.w400,
-                          color: isSelected ? accent : Colors.white,
-                        ),
-                      ),
-                      if (options.first.label == option.label) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 7, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: accent.withOpacity(0.15),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            'Best',
-                            style: GoogleFonts.dmSans(
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              color: accent,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (option) {
-                if (option != null) onChanged(option);
-              },
-              selectedItemBuilder: (context) => options.map((option) {
-                return Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    option.label,
-                    style: GoogleFonts.dmSans(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                      color: Colors.white,
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
+        const SizedBox(height: 2),
+        Text(
+          option.detail,
+          style: const TextStyle(
+            color: PullTubeColors.textSecondary,
+            fontSize: 12,
+            fontWeight: FontWeight.w500,
           ),
         ),
       ],

@@ -1,120 +1,122 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../main.dart';
-
-enum MediaFormat { mp4, mp3 }
+import '../models/video_info.dart';
 
 class FormatToggle extends StatelessWidget {
-  final MediaFormat selected;
-  final ValueChanged<MediaFormat> onChanged;
-
   const FormatToggle({
     super.key,
     required this.selected,
     required this.onChanged,
   });
 
+  final MediaFormat selected;
+  final ValueChanged<MediaFormat>? onChanged;
+
   @override
   Widget build(BuildContext context) {
     final isAudio = selected == MediaFormat.mp3;
-    final accent = isAudio ? AppColors.accentAudio : AppColors.accent;
+    final accent = isAudio
+        ? PullTubeColors.audioAccent
+        : PullTubeColors.videoAccent;
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-      height: 52,
+    return Container(
+      height: 68,
+      padding: const EdgeInsets.all(6),
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: AppColors.border),
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: PullTubeColors.border),
       ),
-      child: Stack(
-        children: [
-          // Sliding pill
-          AnimatedAlign(
-            duration: const Duration(milliseconds: 280),
-            curve: Curves.easeInOut,
-            alignment: isAudio ? Alignment.centerRight : Alignment.centerLeft,
-            child: FractionallySizedBox(
-              widthFactor: 0.5,
-              child: Container(
-                margin: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: accent,
-                  borderRadius: BorderRadius.circular(10),
-                  boxShadow: [
-                    BoxShadow(
-                      color: accent.withOpacity(0.4),
-                      blurRadius: 8,
-                      spreadRadius: 0,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final segmentWidth = (constraints.maxWidth - 6) / 2;
+          return Stack(
+            children: [
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                left: isAudio ? segmentWidth : 0,
+                top: 0,
+                child: Container(
+                  width: segmentWidth,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(20),
+                    gradient: LinearGradient(
+                      colors: [
+                        accent.withValues(alpha: 0.96),
+                        accent.withValues(alpha: 0.72),
+                      ],
                     ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          ),
-          // Labels
-          Row(
-            children: [
-              _FormatTab(
-                label: 'MP4',
-                icon: Icons.videocam_rounded,
-                isSelected: !isAudio,
-                accent: accent,
-                onTap: () => onChanged(MediaFormat.mp4),
-              ),
-              _FormatTab(
-                label: 'MP3',
-                icon: Icons.music_note_rounded,
-                isSelected: isAudio,
-                accent: accent,
-                onTap: () => onChanged(MediaFormat.mp3),
+              Row(
+                children: [
+                  Expanded(
+                    child: _FormatSegment(
+                      label: 'MP4',
+                      icon: Icons.ondemand_video_rounded,
+                      active: selected == MediaFormat.mp4,
+                      onTap: onChanged == null
+                          ? null
+                          : () => onChanged!(MediaFormat.mp4),
+                    ),
+                  ),
+                  Expanded(
+                    child: _FormatSegment(
+                      label: 'MP3',
+                      icon: Icons.graphic_eq_rounded,
+                      active: selected == MediaFormat.mp3,
+                      onTap: onChanged == null
+                          ? null
+                          : () => onChanged!(MediaFormat.mp3),
+                    ),
+                  ),
+                ],
               ),
             ],
-          ),
-        ],
+          );
+        },
       ),
     );
   }
 }
 
-class _FormatTab extends StatelessWidget {
-  final String label;
-  final IconData icon;
-  final bool isSelected;
-  final Color accent;
-  final VoidCallback onTap;
-
-  const _FormatTab({
+class _FormatSegment extends StatelessWidget {
+  const _FormatSegment({
     required this.label,
     required this.icon,
-    required this.isSelected,
-    required this.accent,
+    required this.active,
     required this.onTap,
   });
 
+  final String label;
+  final IconData icon;
+  final bool active;
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(20),
+      child: Center(
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(
               icon,
-              size: 16,
-              color: isSelected ? Colors.white : AppColors.textSecondary,
+              color: active ? Colors.white : PullTubeColors.textSecondary,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 10),
             Text(
               label,
-              style: GoogleFonts.dmSans(
-                fontSize: 14,
-                fontWeight: FontWeight.w700,
-                color: isSelected ? Colors.white : AppColors.textSecondary,
+              style: TextStyle(
+                color: active ? Colors.white : PullTubeColors.textSecondary,
+                fontWeight: FontWeight.w800,
+                fontSize: 15,
               ),
             ),
           ],

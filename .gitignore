@@ -1,7 +1,10 @@
 # Flutter / Dart
 .dart_tool/
+.dart-tool/
 .flutter-plugins
 .flutter-plugins-dependencies
+.flutter
+.flutter_tool_state
 .packages
 .pub-cache/
 .pub/

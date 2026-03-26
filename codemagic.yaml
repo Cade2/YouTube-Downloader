@@ -1,0 +1,22 @@
+workflows:
+  ios-unsigned:
+    name: iOS Unsigned Build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: 16.4
+    scripts:
+      - name: Get Flutter packages
+        script: flutter pub get
+      - name: Pod install
+        script: cd ios && pod install
+      - name: Build unsigned IPA
+        script: |
+          flutter build ios --release --no-codesign
+          cd build/ios/iphoneos
+          mkdir Payload
+          mv Runner.app Payload/Runner.app
+          zip -r PullTube.ipa Payload
+    artifacts:
+      - build/ios/iphoneos/PullTube.ipa

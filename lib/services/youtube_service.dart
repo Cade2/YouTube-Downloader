@@ -1,323 +1,475 @@
-import 'dart:developer' as dev;
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import '../models/video_info.dart';
 
-/// Download progress event emitted during a stream download.
-class DownloadProgress {
-  /// 0.0 – 1.0
-  final double progress;
+class FetchVideoResult {
+  const FetchVideoResult({
+    required this.videoInfo,
+    required this.videoOptions,
+    required this.audioOptions,
+  });
 
-  /// Current download speed in MB/s
-  final double speedMBps;
-
-  const DownloadProgress({required this.progress, required this.speedMBps});
+  final VideoInfo videoInfo;
+  final List<StreamOption> videoOptions;
+  final List<StreamOption> audioOptions;
 }
 
-/// Result returned after a successful download.
-class DownloadResult {
-  final String filePath;
-  final bool savedToGallery;
+class DownloadProgress {
+  const DownloadProgress({
+    required this.progress,
+    required this.speedInMegabytes,
+    required this.receivedBytes,
+    required this.totalBytes,
+  });
 
-  const DownloadResult({required this.filePath, required this.savedToGallery});
+  const DownloadProgress.zero()
+    : progress = 0,
+      speedInMegabytes = 0,
+      receivedBytes = 0,
+      totalBytes = 0;
+
+  final double progress;
+  final double speedInMegabytes;
+  final int receivedBytes;
+  final int totalBytes;
+
+  String get percentLabel =>
+      '${(progress * 100).clamp(0, 100).toStringAsFixed(0)}%';
+
+  String get transferredLabel {
+    final received = _toMegabytes(receivedBytes);
+    final total = totalBytes > 0 ? _toMegabytes(totalBytes) : null;
+    if (total == null) {
+      return '${received.toStringAsFixed(1)} MB';
+    }
+    return '${received.toStringAsFixed(1)} / ${total.toStringAsFixed(1)} MB';
+  }
+
+  static double _toMegabytes(int bytes) => bytes / (1024 * 1024);
+}
+
+class DownloadResult {
+  const DownloadResult({required this.savedToGallery, this.filePath});
+
+  final bool savedToGallery;
+  final String? filePath;
+}
+
+class YouTubeServiceException implements Exception {
+  const YouTubeServiceException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 class YouTubeService {
-  YouTubeService._();
+  YouTubeService()
+    : _youtube = YoutubeExplode(),
+      _dio = Dio(
+        BaseOptions(
+          connectTimeout: const Duration(seconds: 30),
+          receiveTimeout: const Duration(minutes: 15),
+          sendTimeout: const Duration(seconds: 30),
+        ),
+      );
 
-  static final YouTubeService instance = YouTubeService._();
+  final YoutubeExplode _youtube;
+  final Dio _dio;
 
-  final _yt = YoutubeExplode();
+  Future<FetchVideoResult> fetchVideoInfo(String rawUrl) async {
+    final normalizedInput = rawUrl.trim();
+    final videoId = _parseVideoId(normalizedInput);
 
-  // ─── Public API ────────────────────────────────────────────────────────────
-
-  /// Fetches video metadata and ALL available stream options.
-  Future<
-      ({
-        VideoInfo info,
-        List<StreamOption> videoStreams,
-        List<StreamOption> audioStreams,
-      })> fetchVideoData(String rawUrl) async {
-    final videoId = _extractVideoId(rawUrl.trim());
     if (videoId == null) {
-      throw const FormatException(
-          'Could not find a valid YouTube URL. Please check and try again.');
+      throw const YouTubeServiceException(
+        'Enter a valid YouTube link before fetching.',
+      );
     }
 
-    final video = await _yt.videos.get(videoId);
-    final manifest = await _yt.videos.streamsClient.getManifest(videoId);
-
-    // ── Debug: log every stream YouTube returned ───────────────────────────
-    _logManifest(manifest);
-
-    final info = VideoInfo.fromVideo(video);
-    final videoStreams = _buildVideoOptions(manifest);
-    final audioStreams = _buildAudioOptions(manifest);
-
-    debugPrint('[PullTube] ─── Final video options (${videoStreams.length}) ───');
-    for (final o in videoStreams) {
-      debugPrint('[PullTube]   ${o.label}');
-    }
-    debugPrint('[PullTube] ─── Final audio options (${audioStreams.length}) ───');
-    for (final o in audioStreams) {
-      debugPrint('[PullTube]   ${o.label}');
-    }
-
-    return (info: info, videoStreams: videoStreams, audioStreams: audioStreams);
-  }
-
-  /// Downloads [streamInfo] and saves to gallery (MP4) or Documents (WebM/MP3).
-  /// Yields [DownloadProgress] during the transfer.
-  Stream<DownloadProgress> download({
-    required StreamInfo streamInfo,
-    required String safeTitle,
-    required bool isVideo,
-    required void Function(DownloadResult) onComplete,
-    required void Function(String) onError,
-  }) async* {
     try {
-      // ── Determine output file extension from the stream's container ────────
-      final ext = _resolveExtension(streamInfo, isVideo);
-      final willSaveToGallery = isVideo && ext != 'webm';
+      final video = await _youtube.videos.get(videoId);
+      final manifest = await _youtube.videos.streamsClient.getManifest(videoId);
+      final videoInfo = VideoInfo.fromVideo(video);
 
-      // ── Request photo library permission (for gallery-bound files) ─────────
-      if (willSaveToGallery) {
-        final ps = await PhotoManager.requestPermissionExtend();
-        debugPrint('[PullTube] Photo permission state: $ps');
-        if (ps == PermissionState.denied || ps == PermissionState.restricted) {
-          onError(
-              'Photo Library permission is required to save videos.\n'
-              'Please enable it in Settings → Privacy → Photos.');
-          return;
-        }
-      }
+      _logVideoHeader(videoInfo);
+      _logMuxedStreams(manifest.muxed);
+      _logVideoOnlyStreams(manifest.videoOnly);
+      _logAudioOnlyStreams(manifest.audioOnly);
 
-      // ── Prepare temp output file ───────────────────────────────────────────
-      final tempDir = await getTemporaryDirectory();
-      final sanitised = _sanitiseTitle(safeTitle);
-      final filePath =
-          '${tempDir.path}/${sanitised}_${DateTime.now().millisecondsSinceEpoch}.$ext';
-      final file = File(filePath);
-      final sink = file.openWrite();
+      final videoOptions = _buildVideoOptions(manifest);
+      final audioOptions = _buildAudioOptions(manifest);
 
-      debugPrint('[PullTube] Downloading → $filePath');
-      debugPrint('[PullTube] Stream: ${streamInfo.size.totalMegaBytes.toStringAsFixed(1)} MB'
-          ' | container: ${streamInfo.container.value}');
+      _logFinalOptions(videoOptions: videoOptions, audioOptions: audioOptions);
 
-      // ── Pipe the YouTube stream to disk ────────────────────────────────────
-      final totalBytes = streamInfo.size.totalBytes;
-      int downloadedBytes = 0;
-      int lastBytes = 0;
-      int lastMs = 0;
-      final stopwatch = Stopwatch()..start();
-
-      await for (final chunk in _yt.videos.streamsClient.get(streamInfo)) {
-        sink.add(chunk);
-        downloadedBytes += chunk.length;
-
-        final nowMs = stopwatch.elapsedMilliseconds;
-        final elapsedSinceLast = nowMs - lastMs;
-        double speedMBps = 0;
-
-        if (elapsedSinceLast >= 300) {
-          final bytesDelta = downloadedBytes - lastBytes;
-          speedMBps =
-              bytesDelta / (elapsedSinceLast / 1000) / (1024 * 1024);
-          lastBytes = downloadedBytes;
-          lastMs = nowMs;
-        }
-
-        yield DownloadProgress(
-          progress: totalBytes > 0
-              ? (downloadedBytes / totalBytes).clamp(0.0, 1.0)
-              : 0.0,
-          speedMBps: speedMBps,
-        );
-      }
-
-      await sink.flush();
-      await sink.close();
-
-      debugPrint('[PullTube] Download complete. Saving…');
-
-      // ── Save to final destination ──────────────────────────────────────────
-      if (willSaveToGallery) {
-        // Save MP4 to the iOS Photos library (Camera Roll)
-        final asset = await PhotoManager.editor.saveVideo(
-          file,
-          title: '$sanitised.$ext',
-        );
-        await file.delete(); // clean up temp copy
-        if (asset == null) {
-          onError(
-              'The video downloaded successfully but could not be saved to the '
-              'Photo Library. Check permissions in Settings → Privacy → Photos.');
-          return;
-        }
-        debugPrint('[PullTube] Saved to gallery: ${asset.id}');
-        onComplete(DownloadResult(filePath: filePath, savedToGallery: true));
-      } else {
-        // WebM video or audio → save to app Documents (accessible via Files app)
-        final docsDir = await getApplicationDocumentsDirectory();
-        final destPath = '${docsDir.path}/$sanitised.$ext';
-        await file.copy(destPath);
-        await file.delete();
-        debugPrint('[PullTube] Saved to Documents: $destPath');
-        onComplete(DownloadResult(filePath: destPath, savedToGallery: false));
-      }
-    } on YoutubeExplodeException catch (e) {
-      debugPrint('[PullTube] YoutubeExplodeException: ${e.message}');
-      onError('YouTube error: ${e.message}');
+      return FetchVideoResult(
+        videoInfo: videoInfo,
+        videoOptions: videoOptions,
+        audioOptions: audioOptions,
+      );
+    } on YoutubeExplodeException catch (error) {
+      throw YouTubeServiceException(_mapFetchException(error));
     } on SocketException {
-      onError(
-          'No internet connection. Please check your network and try again.');
-    } catch (e, st) {
-      debugPrint('[PullTube] Unexpected error: $e\n$st');
-      onError('Something went wrong: $e');
+      throw const YouTubeServiceException(
+        'Network connection failed while contacting YouTube.',
+      );
+    } on HandshakeException {
+      throw const YouTubeServiceException(
+        'A secure connection to YouTube could not be established.',
+      );
+    } catch (error) {
+      throw YouTubeServiceException(
+        'Unable to fetch video details right now: $error',
+      );
     }
   }
 
-  void dispose() => _yt.close();
+  Future<DownloadResult> downloadSelection({
+    required VideoInfo videoInfo,
+    required StreamOption option,
+    required MediaFormat format,
+    required void Function(DownloadProgress progress) onProgress,
+  }) async {
+    File? temporaryFile;
 
-  // ─── Private helpers ────────────────────────────────────────────────────────
-
-  String? _extractVideoId(String url) {
-    if (RegExp(r'^[\w\-]{11}$').hasMatch(url)) return url;
     try {
-      return VideoId(url).value;
+      if (format == MediaFormat.mp4) {
+        await _ensurePhotoLibraryPermission();
+      }
+
+      final temporaryDirectory = await getTemporaryDirectory();
+      final safeName = _sanitizeFileName(videoInfo.title);
+      final fileName =
+          '${safeName}_${DateTime.now().millisecondsSinceEpoch}.${option.fileExtension}';
+      temporaryFile = File('${temporaryDirectory.path}/$fileName');
+
+      final speedTracker = _SpeedTracker();
+      final fallbackTotal = option.streamInfo.size.totalBytes;
+
+      await _dio.downloadUri(
+        Uri.parse(option.streamInfo.url.toString()),
+        temporaryFile.path,
+        deleteOnError: true,
+        onReceiveProgress: (received, total) {
+          final expectedTotal = total > 0 ? total : fallbackTotal;
+          final progress = expectedTotal > 0 ? received / expectedTotal : 0.0;
+
+          onProgress(
+            DownloadProgress(
+              progress: progress.clamp(0, 1),
+              speedInMegabytes: speedTracker.sample(received),
+              receivedBytes: received,
+              totalBytes: expectedTotal,
+            ),
+          );
+        },
+        options: Options(
+          followRedirects: true,
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+
+      onProgress(
+        DownloadProgress(
+          progress: 1,
+          speedInMegabytes: speedTracker.lastSpeed,
+          receivedBytes: option.streamInfo.size.totalBytes,
+          totalBytes: option.streamInfo.size.totalBytes,
+        ),
+      );
+
+      if (format == MediaFormat.mp4) {
+        await PhotoManager.editor.saveVideo(temporaryFile, title: fileName);
+
+        await temporaryFile.delete();
+        return const DownloadResult(savedToGallery: true);
+      }
+
+      final documentsDirectory = await getApplicationDocumentsDirectory();
+      final savedFile = File('${documentsDirectory.path}/$fileName');
+
+      if (await savedFile.exists()) {
+        await savedFile.delete();
+      }
+
+      final persistedFile = await temporaryFile.copy(savedFile.path);
+      await temporaryFile.delete();
+
+      return DownloadResult(
+        savedToGallery: false,
+        filePath: persistedFile.path,
+      );
+    } on DioException catch (error) {
+      throw YouTubeServiceException(_mapDioException(error));
+    } on YouTubeServiceException {
+      rethrow;
+    } on FileSystemException catch (error) {
+      throw YouTubeServiceException('File saving failed: ${error.message}');
+    } catch (error) {
+      throw YouTubeServiceException('Download failed unexpectedly: $error');
+    } finally {
+      if (temporaryFile != null && await temporaryFile.exists()) {
+        await temporaryFile.delete();
+      }
+    }
+  }
+
+  Future<void> _ensurePhotoLibraryPermission() async {
+    if (!Platform.isIOS) {
+      return;
+    }
+
+    final addOnlyStatus = await Permission.photosAddOnly.request();
+    final hasPermission = addOnlyStatus.isGranted || addOnlyStatus.isLimited;
+
+    if (!hasPermission) {
+      final photosStatus = await Permission.photos.request();
+      final isGranted = photosStatus.isGranted || photosStatus.isLimited;
+      if (!isGranted) {
+        throw const YouTubeServiceException(
+          'Photo Library permission was denied. Allow access before saving video.',
+        );
+      }
+    }
+
+    final photoManagerState = await PhotoManager.requestPermissionExtend();
+    final isAuthorized =
+        photoManagerState == PermissionState.authorized ||
+        photoManagerState == PermissionState.limited;
+
+    if (!isAuthorized) {
+      throw const YouTubeServiceException(
+        'Photo Library access is still unavailable for gallery saving.',
+      );
+    }
+  }
+
+  List<StreamOption> _buildVideoOptions(StreamManifest manifest) {
+    final optionsByHeight = <int, StreamOption>{};
+
+    for (final stream in manifest.videoOnly) {
+      final height = stream.videoResolution.height;
+      final candidate = StreamOption(
+        label: '${height}p',
+        detail: '${stream.container.name.toUpperCase()}  -  Video only',
+        streamInfo: stream,
+        sortValue: height,
+        container: stream.container.name,
+        fileExtension: stream.container.name,
+        hasAudio: false,
+        isMuxed: false,
+      );
+
+      final current = optionsByHeight[height];
+      if (current == null ||
+          (current.container != 'mp4' && candidate.container == 'mp4')) {
+        optionsByHeight[height] = candidate;
+      }
+    }
+
+    for (final stream in manifest.muxed) {
+      final height = stream.videoResolution.height;
+      final candidate = StreamOption(
+        label: '${height}p',
+        detail: '${stream.container.name.toUpperCase()}  -  Audio included',
+        streamInfo: stream,
+        sortValue: height,
+        container: stream.container.name,
+        fileExtension: stream.container.name,
+        hasAudio: true,
+        isMuxed: true,
+      );
+
+      final current = optionsByHeight[height];
+      if (current == null ||
+          !current.isMuxed ||
+          (current.container != 'mp4' && candidate.container == 'mp4')) {
+        optionsByHeight[height] = candidate;
+      }
+    }
+
+    final options = optionsByHeight.values.toList()
+      ..sort((left, right) => right.sortValue.compareTo(left.sortValue));
+
+    return options;
+  }
+
+  List<StreamOption> _buildAudioOptions(StreamManifest manifest) {
+    final optionsByBitrate = <int, StreamOption>{};
+
+    for (final stream in manifest.audioOnly) {
+      final bitrate = stream.bitrate.kiloBitsPerSecond.round();
+      final fileExtension = stream.container.name == 'mp4'
+          ? 'm4a'
+          : stream.container.name;
+      final candidate = StreamOption(
+        label: '$bitrate kbps',
+        detail: '${stream.container.name.toUpperCase()}  -  Audio only',
+        streamInfo: stream,
+        sortValue: bitrate,
+        container: stream.container.name,
+        fileExtension: fileExtension,
+        hasAudio: true,
+        isMuxed: false,
+      );
+
+      final current = optionsByBitrate[bitrate];
+      if (current == null ||
+          (current.container != 'mp4' && candidate.container == 'mp4')) {
+        optionsByBitrate[bitrate] = candidate;
+      }
+    }
+
+    final options = optionsByBitrate.values.toList()
+      ..sort((left, right) => right.sortValue.compareTo(left.sortValue));
+
+    return options;
+  }
+
+  String? _parseVideoId(String input) {
+    if (RegExp(r'^[A-Za-z0-9_-]{11}$').hasMatch(input)) {
+      return input;
+    }
+
+    try {
+      return VideoId(input).value;
     } catch (_) {
       return null;
     }
   }
 
-  /// Builds the MP4/video quality list from ALL available streams.
-  ///
-  /// YouTube serves streams in three groups:
-  ///   - muxed       : video + audio combined, capped at ~720p, available in
-  ///                   both MP4 and WebM containers.
-  ///   - videoOnly   : video only, up to 4K, available in MP4 (H.264) and
-  ///                   WebM (VP9 / AV1) — **no container filter applied here**
-  ///                   because many videos only have 1080p+ as WebM.
-  ///
-  /// Strategy: build a map keyed by pixel height.
-  ///   1. Add every videoOnly stream (prefer MP4 over WebM if both exist at
-  ///      the same height).
-  ///   2. Overwrite with muxed entries at the same height — muxed wins because
-  ///      it includes audio.
-  List<StreamOption> _buildVideoOptions(StreamManifest manifest) {
-    // height → (streamInfo, label)
-    final byHeight = <int, StreamOption>{};
+  String _mapFetchException(YoutubeExplodeException error) {
+    final message = error.message.toLowerCase();
 
-    // ── Pass 1: all video-only streams, NO container filter ────────────────
-    for (final s in manifest.videoOnly) {
-      final h = s.videoResolution.height;
-      final existing = byHeight[h];
-
-      if (existing == null) {
-        byHeight[h] = StreamOption(
-          label: '${s.qualityLabel} (video only)',
-          streamInfo: s,
-        );
-      } else {
-        // At the same height, upgrade from WebM → MP4 if MP4 is available,
-        // because MP4/H.264 is natively supported by the iOS Photos library.
-        final existingIsWebM =
-            existing.streamInfo.container == StreamContainer.webM;
-        final newIsMp4 = s.container == StreamContainer.mp4;
-        if (existingIsWebM && newIsMp4) {
-          byHeight[h] = StreamOption(
-            label: '${s.qualityLabel} (video only)',
-            streamInfo: s,
-          );
-        }
-      }
+    if (message.contains('unavailable') ||
+        message.contains('not available') ||
+        message.contains('private')) {
+      return 'This video is unavailable, private, or restricted.';
     }
 
-    // ── Pass 2: muxed streams (audio+video) overwrite video-only ──────────
-    for (final s in manifest.muxed) {
-      // Accept all containers — prefer MP4 if both MP4 and WebM muxed exist
-      final h = s.videoResolution.height;
-      final existing = byHeight[h];
-      if (existing == null) {
-        byHeight[h] = StreamOption(label: s.qualityLabel, streamInfo: s);
-      } else {
-        // If current entry at this height is video-only, always replace with muxed
-        final currentIsMuxed = existing.streamInfo is MuxedStreamInfo;
-        if (!currentIsMuxed) {
-          byHeight[h] = StreamOption(label: s.qualityLabel, streamInfo: s);
-        } else {
-          // Both muxed: prefer MP4 over WebM
-          final existingIsWebM =
-              existing.streamInfo.container == StreamContainer.webM;
-          if (existingIsWebM && s.container == StreamContainer.mp4) {
-            byHeight[h] = StreamOption(label: s.qualityLabel, streamInfo: s);
-          }
-        }
-      }
+    if (message.contains('playability') || message.contains('age')) {
+      return 'This video appears to be restricted and cannot be downloaded.';
     }
 
-    final sorted = byHeight.entries.toList()
-      ..sort((a, b) => b.key.compareTo(a.key));
-    return sorted.map((e) => e.value).toList();
+    return 'YouTube rejected the request: ${error.message}';
   }
 
-  /// Builds the audio (MP3) quality list from audioOnly streams.
-  /// Accepts both MP4/AAC and WebM/Opus — prefers MP4/AAC for iOS compat.
-  List<StreamOption> _buildAudioOptions(StreamManifest manifest) {
-    // kbps → best stream at that bitrate
-    final byKbps = <int, AudioOnlyStreamInfo>{};
-
-    for (final s in manifest.audioOnly) {
-      final kbps = s.bitrate.kiloBitsPerSecond.round();
-      final existing = byKbps[kbps];
-      if (existing == null) {
-        byKbps[kbps] = s;
-      } else {
-        // Prefer MP4/AAC over WebM/Opus for better iOS compatibility
-        if (existing.container != StreamContainer.mp4 &&
-            s.container == StreamContainer.mp4) {
-          byKbps[kbps] = s;
-        }
-      }
+  String _mapDioException(DioException error) {
+    if (error.type == DioExceptionType.connectionTimeout ||
+        error.type == DioExceptionType.receiveTimeout ||
+        error.type == DioExceptionType.sendTimeout) {
+      return 'The download timed out before the stream finished.';
     }
 
-    final sorted = byKbps.entries.toList()
-      ..sort((a, b) => b.key.compareTo(a.key));
-    return sorted.map((e) {
-      return StreamOption(label: '${e.key} kbps', streamInfo: e.value);
-    }).toList();
+    if (error.type == DioExceptionType.connectionError) {
+      return 'The stream download could not connect to YouTube.';
+    }
+
+    if (error.response?.statusCode case final statusCode?) {
+      return 'YouTube returned HTTP $statusCode while downloading the stream.';
+    }
+
+    return 'The stream download failed: ${error.message ?? 'unknown error'}';
   }
 
-  /// Returns the correct file extension for the given stream.
-  String _resolveExtension(StreamInfo info, bool isVideo) {
-    if (!isVideo) return 'mp3';
-    return info.container == StreamContainer.webM ? 'webm' : 'mp4';
+  String _sanitizeFileName(String title) {
+    final sanitized = title
+        .replaceAll(RegExp(r'[<>:"/\\|?*]'), '')
+        .replaceAll(RegExp(r'\s+'), '_')
+        .trim();
+
+    if (sanitized.isEmpty) {
+      return 'pulltube_download';
+    }
+
+    return sanitized.length > 64 ? sanitized.substring(0, 64) : sanitized;
   }
 
-  String _sanitiseTitle(String title) {
-    final clean = title
-        .replaceAll(RegExp(r'[^\w\s\-]'), '')
-        .replaceAll(RegExp(r'\s+'), '_');
-    final clamped = clean.length > 50 ? clean.substring(0, 50) : clean;
-    return clamped.isEmpty ? 'download' : clamped;
+  void _logVideoHeader(VideoInfo videoInfo) {
+    debugPrint('[PullTube] video id: ${videoInfo.id}');
+    debugPrint('[PullTube] video title: ${videoInfo.title}');
   }
 
-  void _logManifest(StreamManifest manifest) {
-    if (!kDebugMode) return;
-    dev.log(
-      '=== YouTube Stream Manifest ===\n'
-      'Muxed (${manifest.muxed.length}):\n'
-      '${manifest.muxed.map((s) => '  ${s.qualityLabel.padRight(8)} | ${s.container.value.padRight(5)} | ${s.size.totalMegaBytes.toStringAsFixed(1)} MB').join('\n')}\n'
-      'VideoOnly (${manifest.videoOnly.length}):\n'
-      '${manifest.videoOnly.map((s) => '  ${s.qualityLabel.padRight(8)} | ${s.container.value.padRight(5)} | ${s.videoResolution}').join('\n')}\n'
-      'AudioOnly (${manifest.audioOnly.length}):\n'
-      '${manifest.audioOnly.map((s) => '  ${s.bitrate.kiloBitsPerSecond.round().toString().padRight(6)} kbps | ${s.container.value}').join('\n')}',
-      name: 'PullTube',
-    );
+  void _logMuxedStreams(Iterable<MuxedStreamInfo> streams) {
+    debugPrint('[PullTube] muxed streams found: ${streams.length}');
+    for (final stream in streams) {
+      debugPrint(
+        '[PullTube]   muxed ${stream.videoResolution.height}p'
+        ' | ${stream.container.name}'
+        ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
+      );
+    }
+  }
+
+  void _logVideoOnlyStreams(Iterable<VideoOnlyStreamInfo> streams) {
+    debugPrint('[PullTube] videoOnly streams found: ${streams.length}');
+    for (final stream in streams) {
+      debugPrint(
+        '[PullTube]   videoOnly ${stream.videoResolution.height}p'
+        ' | ${stream.container.name}'
+        ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
+      );
+    }
+  }
+
+  void _logAudioOnlyStreams(Iterable<AudioOnlyStreamInfo> streams) {
+    debugPrint('[PullTube] audioOnly streams found: ${streams.length}');
+    for (final stream in streams) {
+      debugPrint(
+        '[PullTube]   audioOnly ${stream.bitrate.kiloBitsPerSecond.round()} kbps'
+        ' | ${stream.container.name}'
+        ' | ${stream.size.totalMegaBytes.toStringAsFixed(1)} MB',
+      );
+    }
+  }
+
+  void _logFinalOptions({
+    required List<StreamOption> videoOptions,
+    required List<StreamOption> audioOptions,
+  }) {
+    debugPrint('[PullTube] final deduplicated options sent to UI:');
+    for (final option in videoOptions) {
+      debugPrint('[PullTube]   video ${option.label} -> ${option.detail}');
+    }
+    for (final option in audioOptions) {
+      debugPrint('[PullTube]   audio ${option.label} -> ${option.detail}');
+    }
+  }
+
+  void dispose() {
+    _dio.close(force: true);
+    _youtube.close();
+  }
+}
+
+class _SpeedTracker {
+  int _lastBytes = 0;
+  DateTime _lastSample = DateTime.now();
+  double lastSpeed = 0;
+
+  double sample(int receivedBytes) {
+    final now = DateTime.now();
+    final elapsedMilliseconds = now.difference(_lastSample).inMilliseconds;
+
+    if (elapsedMilliseconds < 250) {
+      return lastSpeed;
+    }
+
+    final byteDelta = receivedBytes - _lastBytes;
+    if (byteDelta > 0) {
+      lastSpeed = byteDelta / (elapsedMilliseconds / 1000) / (1024 * 1024);
+    }
+
+    _lastBytes = receivedBytes;
+    _lastSample = now;
+    return lastSpeed;
   }
 }

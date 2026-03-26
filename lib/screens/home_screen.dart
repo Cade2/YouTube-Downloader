@@ -1,8 +1,8 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../main.dart';
 import '../models/video_info.dart';
@@ -15,7 +15,7 @@ import '../widgets/shimmer_loader.dart';
 import '../widgets/sound_wave_widget.dart';
 import '../widgets/video_info_card.dart';
 
-enum _AppState { idle, loading, ready, downloading, error }
+enum _ScreenState { idle, loading, ready, downloading }
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -26,428 +26,626 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with SingleTickerProviderStateMixin {
-  // ─── Controllers ────────────────────────────────────────────────────────────
   final _urlController = TextEditingController();
   final _scrollController = ScrollController();
-  late final AnimationController _successCtrl;
+  final _youtubeService = YouTubeService();
+
+  late final AnimationController _successController;
   late final Animation<double> _successScale;
 
-  // ─── State ──────────────────────────────────────────────────────────────────
-  _AppState _state = _AppState.idle;
-  String? _errorMessage;
+  _ScreenState _screenState = _ScreenState.idle;
+  MediaFormat _selectedFormat = MediaFormat.mp4;
   VideoInfo? _videoInfo;
-  List<StreamOption> _videoStreams = [];
-  List<StreamOption> _audioStreams = [];
-  StreamOption? _selectedStream;
-  MediaFormat _format = MediaFormat.mp4;
-  double _downloadProgress = 0;
-  double _downloadSpeed = 0;
+  List<StreamOption> _videoOptions = const [];
+  List<StreamOption> _audioOptions = const [];
+  StreamOption? _selectedOption;
+  DownloadProgress _downloadProgress = const DownloadProgress.zero();
+  String? _errorMessage;
+  String? _successMessage;
+  Timer? _successTimer;
 
-  StreamSubscription<DownloadProgress>? _downloadSub;
+  bool get _isLoading => _screenState == _ScreenState.loading;
+  bool get _isDownloading => _screenState == _ScreenState.downloading;
+  bool get _hasVideo => _videoInfo != null;
+  bool get _isAudioMode => _selectedFormat == MediaFormat.mp3;
+  Color get _accent =>
+      _isAudioMode ? PullTubeColors.audioAccent : PullTubeColors.videoAccent;
 
-  // ─── Lifecycle ──────────────────────────────────────────────────────────────
+  List<StreamOption> get _activeOptions =>
+      _isAudioMode ? _audioOptions : _videoOptions;
+
   @override
   void initState() {
     super.initState();
-    _successCtrl = AnimationController(
+    _successController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 600),
+      duration: const Duration(milliseconds: 700),
     );
     _successScale = CurvedAnimation(
-      parent: _successCtrl,
+      parent: _successController,
       curve: Curves.elasticOut,
     );
   }
 
   @override
   void dispose() {
+    _successTimer?.cancel();
+    _successController.dispose();
     _urlController.dispose();
     _scrollController.dispose();
-    _successCtrl.dispose();
-    _downloadSub?.cancel();
-    YouTubeService.instance.dispose();
+    _youtubeService.dispose();
     super.dispose();
   }
 
-  // ─── Actions ─────────────────────────────────────────────────────────────────
-
   Future<void> _pasteAndFetch() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text?.trim() ?? '';
-    if (text.isEmpty) return;
+    final clipboard = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = clipboard?.text?.trim() ?? '';
+    if (text.isEmpty) {
+      _showError('Clipboard is empty. Copy a YouTube URL first.');
+      return;
+    }
     _urlController.text = text;
-    await _fetchVideoInfo(text);
+    await _fetchVideoInfo();
   }
 
-  Future<void> _fetchVideoInfo(String url) async {
-    if (url.trim().isEmpty) return;
+  Future<void> _fetchVideoInfo() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) {
+      _showError('Paste a YouTube URL to start.');
+      return;
+    }
+
     setState(() {
-      _state = _AppState.loading;
+      _screenState = _ScreenState.loading;
       _errorMessage = null;
+      _successMessage = null;
       _videoInfo = null;
-      _videoStreams = [];
-      _audioStreams = [];
+      _videoOptions = const [];
+      _audioOptions = const [];
+      _selectedOption = null;
     });
 
     try {
-      final result = await YouTubeService.instance.fetchVideoData(url);
-      if (!mounted) return;
-
-      if (result.videoStreams.isEmpty && result.audioStreams.isEmpty) {
-        setState(() {
-          _state = _AppState.error;
-          _errorMessage =
-              'No downloadable streams found for this video. It may be restricted or unavailable.';
-        });
+      final result = await _youtubeService.fetchVideoInfo(url);
+      if (!mounted) {
         return;
       }
 
+      final defaultFormat = result.videoOptions.isNotEmpty
+          ? MediaFormat.mp4
+          : MediaFormat.mp3;
+      final defaultOptions = defaultFormat == MediaFormat.mp4
+          ? result.videoOptions
+          : result.audioOptions;
+
       setState(() {
-        _videoInfo = result.info;
-        _videoStreams = result.videoStreams;
-        _audioStreams = result.audioStreams;
-        _format = MediaFormat.mp4;
-        _selectedStream =
-            result.videoStreams.isNotEmpty ? result.videoStreams.first : null;
-        _state = _AppState.ready;
+        _screenState = _ScreenState.ready;
+        _selectedFormat = defaultFormat;
+        _videoInfo = result.videoInfo;
+        _videoOptions = result.videoOptions;
+        _audioOptions = result.audioOptions;
+        _selectedOption = defaultOptions.isEmpty ? null : defaultOptions.first;
       });
 
-      // Scroll down so controls are visible
-      await Future.delayed(const Duration(milliseconds: 100));
-      _scrollToBottom();
-    } on FormatException catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _state = _AppState.error;
-        _errorMessage = e.message;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.animateTo(
+            _scrollController.position.maxScrollExtent.clamp(0, 420),
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOutCubic,
+          );
+        }
       });
-    } catch (e) {
-      if (!mounted) return;
+    } on YouTubeServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
       setState(() {
-        _state = _AppState.error;
-        _errorMessage =
-            'Could not load video. Check your internet connection and the URL.';
+        _screenState = _ScreenState.idle;
+        _errorMessage = error.message;
       });
     }
   }
 
   void _onFormatChanged(MediaFormat format) {
-    final streams =
-        format == MediaFormat.mp4 ? _videoStreams : _audioStreams;
+    final options = format == MediaFormat.mp4 ? _videoOptions : _audioOptions;
     setState(() {
-      _format = format;
-      _selectedStream = streams.isNotEmpty ? streams.first : null;
+      _selectedFormat = format;
+      _selectedOption = options.isEmpty ? null : options.first;
+      _errorMessage = null;
+      _successMessage = null;
     });
   }
 
-  void _startDownload() {
-    if (_selectedStream == null || _videoInfo == null) return;
-    final isVideo = _format == MediaFormat.mp4;
+  Future<void> _downloadSelectedStream() async {
+    final videoInfo = _videoInfo;
+    final selectedOption = _selectedOption;
+    if (videoInfo == null || selectedOption == null) {
+      _showError('Choose a stream option before downloading.');
+      return;
+    }
 
     setState(() {
-      _state = _AppState.downloading;
-      _downloadProgress = 0;
-      _downloadSpeed = 0;
+      _screenState = _ScreenState.downloading;
+      _downloadProgress = const DownloadProgress.zero();
+      _errorMessage = null;
+      _successMessage = null;
     });
 
-    _downloadSub?.cancel();
-    _downloadSub = YouTubeService.instance
-        .download(
-          streamInfo: _selectedStream!.streamInfo,
-          safeTitle: _videoInfo!.title,
-          isVideo: isVideo,
-          onComplete: (result) {
-            if (!mounted) return;
-            setState(() {
-              _state = _AppState.ready;
-              _downloadProgress = 0;
-              _downloadSpeed = 0;
-            });
-            _successCtrl.forward(from: 0);
-            final msg = result.savedToGallery
-                ? 'Saved to Gallery'
-                : 'Saved to Files';
-            _showSuccessSnackbar(msg);
-          },
-          onError: (msg) {
-            if (!mounted) return;
-            setState(() {
-              _state = _AppState.ready;
-              _downloadProgress = 0;
-              _downloadSpeed = 0;
-            });
-            _showErrorSnackbar(msg);
-          },
-        )
-        .listen((event) {
-      if (!mounted) return;
+    try {
+      final result = await _youtubeService.downloadSelection(
+        videoInfo: videoInfo,
+        option: selectedOption,
+        format: _selectedFormat,
+        onProgress: (progress) {
+          if (!mounted) {
+            return;
+          }
+          setState(() {
+            _downloadProgress = progress;
+          });
+        },
+      );
+
+      if (!mounted) {
+        return;
+      }
+
       setState(() {
-        _downloadProgress = event.progress;
-        if (event.speedMBps > 0) _downloadSpeed = event.speedMBps;
+        _screenState = _ScreenState.ready;
+      });
+      _showSuccess(
+        result.savedToGallery ? 'Saved to Gallery' : 'Saved to Files',
+      );
+    } on YouTubeServiceException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _screenState = _ScreenState.ready;
+      });
+      _showError(error.message);
+    }
+  }
+
+  void _reset() {
+    _successTimer?.cancel();
+    _urlController.clear();
+    setState(() {
+      _screenState = _ScreenState.idle;
+      _selectedFormat = MediaFormat.mp4;
+      _videoInfo = null;
+      _videoOptions = const [];
+      _audioOptions = const [];
+      _selectedOption = null;
+      _downloadProgress = const DownloadProgress.zero();
+      _errorMessage = null;
+      _successMessage = null;
+    });
+  }
+
+  void _showSuccess(String message) {
+    _successTimer?.cancel();
+    setState(() {
+      _successMessage = message;
+      _errorMessage = null;
+    });
+    _successController.forward(from: 0);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(
+                Icons.check_circle_rounded,
+                color: PullTubeColors.success,
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
+      );
+    _successTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _successMessage = null;
       });
     });
   }
 
-  void _reset() {
-    _downloadSub?.cancel();
-    _urlController.clear();
+  void _showError(String message) {
     setState(() {
-      _state = _AppState.idle;
-      _errorMessage = null;
-      _videoInfo = null;
-      _videoStreams = [];
-      _audioStreams = [];
-      _selectedStream = null;
-      _downloadProgress = 0;
-      _downloadSpeed = 0;
+      _errorMessage = message;
+      _successMessage = null;
     });
-  }
-
-  void _scrollToBottom() {
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeOut,
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(
+                Icons.error_outline_rounded,
+                color: PullTubeColors.error,
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Text(message)),
+            ],
+          ),
+        ),
       );
-    }
   }
-
-  // ─── Snackbars ──────────────────────────────────────────────────────────────
-
-  void _showSuccessSnackbar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.check_circle_rounded,
-                color: Color(0xFF4CAF50), size: 20),
-            const SizedBox(width: 10),
-            Text(message,
-                style: GoogleFonts.dmSans(fontWeight: FontWeight.w600)),
-          ],
-        ),
-        duration: const Duration(seconds: 3),
-      ),
-    );
-  }
-
-  void _showErrorSnackbar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Row(
-          children: [
-            const Icon(Icons.error_outline_rounded,
-                color: AppColors.accent, size: 20),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(message,
-                  style: GoogleFonts.dmSans(fontWeight: FontWeight.w500)),
-            ),
-          ],
-        ),
-        duration: const Duration(seconds: 4),
-      ),
-    );
-  }
-
-  // ─── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final isAudio = _format == MediaFormat.mp3;
-    final accent = isAudio ? AppColors.accentAudio : AppColors.accent;
+    final showCompatBanner =
+        !_isAudioMode && _videoOptions.any((option) => !option.hasAudio);
 
     return Scaffold(
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildAppBar(accent, isAudio),
-            Expanded(
-              child: ListView(
-                controller: _scrollController,
-                padding: const EdgeInsets.fromLTRB(20, 8, 20, 40),
-                children: [
-                  _buildUrlInput(accent),
-                  const SizedBox(height: 20),
-                  _buildMainContent(isAudio, accent),
+      body: Stack(
+        children: [
+          Container(color: PullTubeColors.background),
+          _buildBackdrop(),
+          SafeArea(
+            child: ListView(
+              controller: _scrollController,
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 28),
+              children: [
+                _buildHeader(),
+                const SizedBox(height: 22),
+                _buildUrlCard(),
+                if (_errorMessage != null) ...[
+                  const SizedBox(height: 14),
+                  _buildNotice(
+                    title: 'Fetch issue',
+                    message: _errorMessage!,
+                    color: PullTubeColors.error,
+                    icon: Icons.info_outline_rounded,
+                  ),
                 ],
-              ),
+                if (_successMessage != null) ...[
+                  const SizedBox(height: 14),
+                  ScaleTransition(
+                    scale: _successScale,
+                    child: _buildNotice(
+                      title: 'Complete',
+                      message: _successMessage!,
+                      color: PullTubeColors.success,
+                      icon: Icons.check_circle_rounded,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 18),
+                if (_isLoading)
+                  const ShimmerLoader()
+                else if (!_hasVideo)
+                  _buildIdleCard()
+                else ...[
+                  VideoInfoCard(
+                    info: _videoInfo!,
+                    accent: _accent,
+                    isAudioMode: _isAudioMode,
+                  ),
+                  const SizedBox(height: 18),
+                  if (_isAudioMode) _buildAudioBanner(),
+                  if (showCompatBanner) _buildCompatBanner(),
+                  if (_isAudioMode || showCompatBanner)
+                    const SizedBox(height: 18),
+                  FormatToggle(
+                    selected: _selectedFormat,
+                    onChanged: _isDownloading ? null : _onFormatChanged,
+                  ),
+                  const SizedBox(height: 16),
+                  QualityDropdown(
+                    options: _activeOptions,
+                    selected: _selectedOption,
+                    format: _selectedFormat,
+                    enabled: !_isDownloading,
+                    onChanged: (value) =>
+                        setState(() => _selectedOption = value),
+                  ),
+                  if (_isDownloading) ...[
+                    const SizedBox(height: 16),
+                    ProgressCard(
+                      progress: _downloadProgress,
+                      format: _selectedFormat,
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  DownloadButton(
+                    format: _selectedFormat,
+                    isEnabled: !_isDownloading && _selectedOption != null,
+                    isBusy: _isDownloading,
+                    onPressed: _downloadSelectedStream,
+                  ),
+                ],
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildAppBar(Color accent, bool isAudio) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 16, 4),
-      child: Row(
+  Widget _buildBackdrop() {
+    return IgnorePointer(
+      child: Stack(
         children: [
-          // Logo / Title
-          Row(
+          Positioned(
+            top: -120,
+            right: -50,
+            child: _BackdropOrb(color: _accent, size: 240),
+          ),
+          Positioned(
+            top: 220,
+            left: -80,
+            child: _BackdropOrb(
+              color: _isAudioMode
+                  ? PullTubeColors.audioAccentDeep
+                  : PullTubeColors.videoAccentDeep,
+              size: 180,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(28),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.03),
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.07)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 32,
-                height: 32,
-                decoration: BoxDecoration(
-                  color: accent,
-                  borderRadius: BorderRadius.circular(8),
-                  boxShadow: [
-                    BoxShadow(
-                      color: accent.withOpacity(0.4),
-                      blurRadius: 10,
-                      offset: const Offset(0, 3),
+              Row(
+                children: [
+                  Container(
+                    width: 58,
+                    height: 58,
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(18),
+                      gradient: LinearGradient(
+                        colors: [_accent, _accent.withValues(alpha: 0.72)],
+                      ),
                     ),
-                  ],
-                ),
-                child: const Icon(
-                  Icons.play_arrow_rounded,
-                  color: Colors.white,
-                  size: 22,
-                ),
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: const [
+                        Icon(Icons.bolt_rounded, color: Colors.white, size: 28),
+                        Positioned(
+                          bottom: 9,
+                          child: Icon(
+                            Icons.arrow_downward_rounded,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'PullTube',
+                          style: TextStyle(
+                            fontSize: 30,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -1.1,
+                          ),
+                        ),
+                        Text(
+                          _isAudioMode
+                              ? 'Audio mode is armed with warm bitrate controls.'
+                              : 'Premium personal downloads with full stream visibility.',
+                          style: const TextStyle(
+                            color: PullTubeColors.textSecondary,
+                            fontSize: 13.5,
+                            height: 1.5,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_hasVideo)
+                    IconButton(
+                      onPressed: _isDownloading ? null : _reset,
+                      icon: const Icon(
+                        Icons.refresh_rounded,
+                        color: PullTubeColors.textSecondary,
+                      ),
+                    ),
+                ],
               ),
-              const SizedBox(width: 10),
-              AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 300),
-                style: GoogleFonts.dmSans(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                  letterSpacing: -0.5,
-                ),
-                child: const Text('PullTube'),
+              const SizedBox(height: 16),
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildMetricPill(
+                      'Theme',
+                      _isAudioMode ? 'Audio' : 'Video',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _buildMetricPill(
+                      'Outputs',
+                      _isAudioMode ? 'Files' : 'Gallery',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Container(
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: PullTubeColors.surface,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(color: PullTubeColors.border),
+                      ),
+                      child: Center(
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                _isAudioMode
+                                    ? Icons.graphic_eq_rounded
+                                    : Icons.high_quality_rounded,
+                                color: _accent,
+                              ),
+                              const SizedBox(width: 10),
+                              Text(
+                                _isAudioMode
+                                    ? 'Bitrate-first'
+                                    : 'Muxed + VideoOnly',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              if (_isAudioMode) ...[
+                                const SizedBox(width: 12),
+                                const SoundWaveWidget(
+                                  color: PullTubeColors.audioAccent,
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
-          const Spacer(),
-          // Audio mode indicator
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 300),
-            child: isAudio
-                ? Padding(
-                    key: const ValueKey('wave'),
-                    padding: const EdgeInsets.only(right: 4),
-                    child: const SoundWaveWidget(size: 24),
-                  )
-                : const SizedBox.shrink(key: ValueKey('empty')),
-          ),
-          // Reset button (shown when video is loaded)
-          if (_state != _AppState.idle && _state != _AppState.loading)
-            IconButton(
-              icon: const Icon(Icons.close_rounded,
-                  color: AppColors.textSecondary),
-              onPressed: _state == _AppState.downloading ? null : _reset,
-              tooltip: 'Clear',
-            ),
-        ],
+        ),
       ),
     );
   }
 
-  Widget _buildUrlInput(Color accent) {
-    final hasText = _urlController.text.isNotEmpty;
-
+  Widget _buildMetricPill(String title, String value) {
     return Container(
+      height: 52,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: _state == _AppState.loading || _state == _AppState.downloading
-              ? accent.withOpacity(0.4)
-              : AppColors.border,
-        ),
-        boxShadow: [
-          if (_state == _AppState.loading || _state == _AppState.downloading)
-            BoxShadow(
-              color: accent.withOpacity(0.08),
-              blurRadius: 20,
-              spreadRadius: 2,
-            ),
-        ],
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: PullTubeColors.border),
       ),
-      padding: const EdgeInsets.all(16),
       child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'YouTube URL',
-            style: GoogleFonts.dmSans(
+            title,
+            style: const TextStyle(
+              color: PullTubeColors.textMuted,
               fontSize: 11,
               fontWeight: FontWeight.w600,
-              color: AppColors.textSecondary,
-              letterSpacing: 0.8,
             ),
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _urlController,
-                  enabled: _state != _AppState.downloading,
-                  style: GoogleFonts.dmSans(
-                    fontSize: 14,
-                    color: Colors.white,
-                    fontWeight: FontWeight.w400,
-                  ),
-                  decoration: InputDecoration(
-                    hintText: 'https://youtube.com/watch?v=…',
-                    hintStyle: GoogleFonts.dmSans(
-                      color: AppColors.textMuted,
-                      fontSize: 14,
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: TextStyle(color: _accent, fontWeight: FontWeight.w800),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUrlCard() {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 250),
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(
+          color: _isLoading || _isDownloading
+              ? _accent.withValues(alpha: 0.6)
+              : PullTubeColors.border,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'YouTube URL',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: PullTubeColors.textSecondary,
+              letterSpacing: 1.1,
+            ),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _urlController,
+            enabled: !_isDownloading,
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _fetchVideoInfo(),
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.go,
+            autocorrect: false,
+            decoration: InputDecoration(
+              hintText: 'https://youtube.com/watch?v=...',
+              suffixIcon: _urlController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      onPressed: _isDownloading
+                          ? null
+                          : () => setState(_urlController.clear),
+                      icon: const Icon(
+                        Icons.close_rounded,
+                        color: PullTubeColors.textMuted,
+                      ),
                     ),
-                    filled: false,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    contentPadding: EdgeInsets.zero,
-                    isDense: true,
-                  ),
-                  onSubmitted: (url) => _fetchVideoInfo(url),
-                  textInputAction: TextInputAction.go,
-                  keyboardType: TextInputType.url,
-                  autocorrect: false,
-                ),
-              ),
-              if (hasText)
-                GestureDetector(
-                  onTap: () {
-                    _urlController.clear();
-                    setState(() {});
-                  },
-                  child: const Padding(
-                    padding: EdgeInsets.only(left: 8),
-                    child: Icon(Icons.cancel_rounded,
-                        color: AppColors.textMuted, size: 18),
-                  ),
-                ),
-            ],
+            ),
           ),
           const SizedBox(height: 14),
           Row(
             children: [
-              // Paste button
-              _UrlActionButton(
-                icon: Icons.content_paste_rounded,
-                label: 'Paste & Fetch',
-                color: accent,
-                onTap: _state == _AppState.downloading
-                    ? null
-                    : _pasteAndFetch,
+              Expanded(
+                flex: 8,
+                child: _buildActionButton(
+                  title: 'Paste & Fetch',
+                  icon: Icons.content_paste_go_rounded,
+                  enabled: !_isDownloading,
+                  filled: true,
+                  onTap: _pasteAndFetch,
+                ),
               ),
               const SizedBox(width: 10),
-              // Fetch button (when URL is typed manually)
-              if (hasText)
-                _UrlActionButton(
-                  icon: Icons.search_rounded,
-                  label: 'Fetch',
-                  color: AppColors.textSecondary,
-                  onTap: _state == _AppState.downloading
-                      ? null
-                      : () => _fetchVideoInfo(_urlController.text),
+              Expanded(
+                flex: 5,
+                child: _buildActionButton(
+                  title: 'Fetch',
+                  icon: Icons.north_east_rounded,
+                  enabled:
+                      !_isDownloading && _urlController.text.trim().isNotEmpty,
+                  filled: false,
+                  onTap: _fetchVideoInfo,
                 ),
+              ),
             ],
           ),
         ],
@@ -455,190 +653,93 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildMainContent(bool isAudio, Color accent) {
-    switch (_state) {
-      case _AppState.idle:
-        return _buildIdleHint();
+  Widget _buildActionButton({
+    required String title,
+    required IconData icon,
+    required bool enabled,
+    required bool filled,
+    required FutureOr<void> Function() onTap,
+  }) {
+    final gradient = filled
+        ? LinearGradient(colors: [_accent, _accent.withValues(alpha: 0.75)])
+        : null;
 
-      case _AppState.loading:
-        return Column(
-          children: const [
-            ShimmerLoader(),
-            SizedBox(height: 16),
-            ShimmerControls(),
-          ],
-        );
-
-      case _AppState.error:
-        return _buildErrorCard();
-
-      case _AppState.ready:
-      case _AppState.downloading:
-        final streams =
-            isAudio ? _audioStreams : _videoStreams;
-        return Column(
-          children: [
-            // Video info card with entry animation
-            if (_videoInfo != null)
-              TweenAnimationBuilder<double>(
-                tween: Tween(begin: 0, end: 1),
-                duration: const Duration(milliseconds: 400),
-                curve: Curves.easeOut,
-                builder: (_, v, child) => Opacity(
-                  opacity: v,
-                  child: Transform.translate(
-                    offset: Offset(0, 20 * (1 - v)),
-                    child: child,
-                  ),
+    return Opacity(
+      opacity: enabled ? 1 : 0.45,
+      child: InkWell(
+        onTap: enabled ? () => onTap() : null,
+        borderRadius: BorderRadius.circular(18),
+        child: Ink(
+          height: 54,
+          decoration: BoxDecoration(
+            color: filled ? null : PullTubeColors.surfaceSecondary,
+            gradient: gradient,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(
+              color: filled
+                  ? Colors.transparent
+                  : _accent.withValues(alpha: 0.24),
+            ),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: Colors.white, size: 18),
+              const SizedBox(width: 10),
+              Text(
+                title,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w700,
                 ),
-                child: VideoInfoCard(info: _videoInfo!),
               ),
-
-            const SizedBox(height: 20),
-
-            // Audio mode badge
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 300),
-              child: isAudio
-                  ? _AudioModeBadge(key: const ValueKey('badge'))
-                  : const SizedBox.shrink(key: ValueKey('empty')),
-            ),
-            if (isAudio) const SizedBox(height: 12),
-
-            // Format toggle
-            FormatToggle(
-              selected: _format,
-              onChanged: _state == _AppState.downloading
-                  ? (_) {}
-                  : _onFormatChanged,
-            ),
-            const SizedBox(height: 16),
-
-            // Quality dropdown
-            if (streams.isNotEmpty)
-              QualityDropdown(
-                options: streams,
-                selected: _selectedStream,
-                format: _format,
-                onChanged: _state == _AppState.downloading
-                    ? (_) {}
-                    : (s) => setState(() => _selectedStream = s),
-              ),
-
-            const SizedBox(height: 16),
-
-            // Progress card (downloading only)
-            if (_state == _AppState.downloading)
-              ProgressCard(
-                progress: _downloadProgress,
-                speedMBps: _downloadSpeed,
-                format: _format,
-              ),
-
-            if (_state == _AppState.downloading) const SizedBox(height: 16),
-
-            // Download button
-            DownloadButton(
-              format: _format,
-              isEnabled: _state == _AppState.ready &&
-                  _selectedStream != null,
-              onPressed: _startDownload,
-            ),
-          ],
-        );
-    }
-  }
-
-  Widget _buildIdleHint() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 40),
-        child: Column(
-          children: [
-            Container(
-              width: 72,
-              height: 72,
-              decoration: BoxDecoration(
-                color: AppColors.card,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: AppColors.border),
-              ),
-              child: const Icon(
-                Icons.link_rounded,
-                color: AppColors.textMuted,
-                size: 32,
-              ),
-            ),
-            const SizedBox(height: 20),
-            Text(
-              'Paste a YouTube URL above',
-              style: GoogleFonts.dmSans(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: AppColors.textSecondary,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Download videos in MP4 or\naudio tracks in MP3',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.dmSans(
-                fontSize: 13,
-                color: AppColors.textMuted,
-                height: 1.5,
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildErrorCard() {
+  Widget _buildNotice({
+    required String title,
+    required String message,
+    required Color color,
+    required IconData icon,
+  }) {
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppColors.accent.withOpacity(0.3)),
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: color.withValues(alpha: 0.28)),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.error_outline_rounded,
-              color: AppColors.accent, size: 22),
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon, color: color),
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Something went wrong',
-                  style: GoogleFonts.dmSans(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
-                  ),
+                  title,
+                  style: const TextStyle(fontWeight: FontWeight.w800),
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 5),
                 Text(
-                  _errorMessage ?? 'An unexpected error occurred.',
-                  style: GoogleFonts.dmSans(
-                    fontSize: 13,
-                    color: AppColors.textSecondary,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                GestureDetector(
-                  onTap: () => _fetchVideoInfo(_urlController.text),
-                  child: Text(
-                    'Try again',
-                    style: GoogleFonts.dmSans(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.accent,
-                    ),
+                  message,
+                  style: const TextStyle(
+                    color: PullTubeColors.textSecondary,
+                    height: 1.45,
                   ),
                 ),
               ],
@@ -648,50 +749,106 @@ class _HomeScreenState extends State<HomeScreen>
       ),
     );
   }
+
+  Widget _buildIdleCard() {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(28),
+        border: Border.all(color: PullTubeColors.border),
+      ),
+      child: const Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _IdleTile(
+            icon: Icons.auto_awesome_rounded,
+            title: 'Paste a link and fetch instantly',
+            message:
+                'PullTube surfaces metadata fast, then preselects the highest quality stream option available.',
+          ),
+          SizedBox(height: 14),
+          _IdleTile(
+            icon: Icons.high_quality_rounded,
+            title: 'See every quality tier',
+            message:
+                'MP4 combines muxed and video-only manifests, deduplicated by height and sorted from highest to lowest.',
+          ),
+          SizedBox(height: 14),
+          _IdleTile(
+            icon: Icons.graphic_eq_rounded,
+            title: 'Switch into audio mode',
+            message:
+                'Warm amber styling, bitrate-first choices, animated wave feedback, and Files saving for audio downloads.',
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAudioBanner() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: PullTubeColors.audioAccent.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: PullTubeColors.audioAccent.withValues(alpha: 0.26),
+        ),
+      ),
+      child: const Row(
+        children: [
+          SoundWaveWidget(color: PullTubeColors.audioAccent),
+          SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              'Audio mode highlights bitrate options and saves the downloaded file into PullTube documents for Files access.',
+              style: TextStyle(
+                color: PullTubeColors.audioAccentDeep,
+                fontWeight: FontWeight.w700,
+                height: 1.35,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCompatBanner() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: PullTubeColors.surface,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: PullTubeColors.borderStrong),
+      ),
+      child: const Text(
+        'Higher resolutions can appear as video-only because YouTube does not always expose a muxed stream at every height.',
+        style: TextStyle(color: PullTubeColors.textSecondary, height: 1.45),
+      ),
+    );
+  }
 }
 
-// ─── Small helper widgets ──────────────────────────────────────────────────────
+class _BackdropOrb extends StatelessWidget {
+  const _BackdropOrb({required this.color, required this.size});
 
-class _UrlActionButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
   final Color color;
-  final VoidCallback? onTap;
-
-  const _UrlActionButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onTap,
-  });
+  final double size;
 
   @override
   Widget build(BuildContext context) {
-    final enabled = onTap != null;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-        decoration: BoxDecoration(
-          color: enabled ? color.withOpacity(0.12) : AppColors.card,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(
-            color: enabled ? color.withOpacity(0.25) : AppColors.border,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 15, color: enabled ? color : AppColors.textMuted),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: GoogleFonts.dmSans(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: enabled ? color : AppColors.textMuted,
-              ),
-            ),
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        gradient: RadialGradient(
+          colors: [
+            color.withValues(alpha: 0.28),
+            color.withValues(alpha: 0.04),
+            Colors.transparent,
           ],
         ),
       ),
@@ -699,33 +856,56 @@ class _UrlActionButton extends StatelessWidget {
   }
 }
 
-class _AudioModeBadge extends StatelessWidget {
-  const _AudioModeBadge({super.key});
+class _IdleTile extends StatelessWidget {
+  const _IdleTile({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: AppColors.accentAudio.withOpacity(0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.accentAudio.withOpacity(0.2)),
-      ),
-      child: Row(
-        children: [
-          const SoundWaveWidget(size: 20),
-          const SizedBox(width: 12),
-          Text(
-            'Audio mode — extracts the audio track only',
-            style: GoogleFonts.dmSans(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: AppColors.accentAudio,
-            ),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          width: 42,
+          height: 42,
+          decoration: BoxDecoration(
+            color: PullTubeColors.surfaceSecondary,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: PullTubeColors.border),
           ),
-        ],
-      ),
+          child: Icon(icon, color: Colors.white),
+        ),
+        const SizedBox(width: 14),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 15,
+                ),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                message,
+                style: const TextStyle(
+                  color: PullTubeColors.textSecondary,
+                  height: 1.45,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

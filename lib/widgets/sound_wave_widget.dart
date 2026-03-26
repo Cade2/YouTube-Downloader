@@ -2,13 +2,15 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
-import '../main.dart';
-
-/// Animated sound-wave bars displayed in MP3 / audio mode.
 class SoundWaveWidget extends StatefulWidget {
-  final double size;
+  const SoundWaveWidget({
+    super.key,
+    this.color = const Color(0xFFF3B24F),
+    this.size = 24,
+  });
 
-  const SoundWaveWidget({super.key, this.size = 36});
+  final Color color;
+  final double size;
 
   @override
   State<SoundWaveWidget> createState() => _SoundWaveWidgetState();
@@ -23,7 +25,7 @@ class _SoundWaveWidgetState extends State<SoundWaveWidget>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 1050),
     )..repeat();
   }
 
@@ -35,49 +37,32 @@ class _SoundWaveWidgetState extends State<SoundWaveWidget>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (_, __) => CustomPaint(
-        painter: _WavePainter(_controller.value),
-        size: Size(widget.size * 1.4, widget.size),
+    final barWidth = widget.size / 7;
+
+    return SizedBox(
+      width: widget.size,
+      height: widget.size,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: List.generate(4, (index) {
+              final phase = (_controller.value * math.pi * 2) + index;
+              final normalized = 0.3 + ((math.sin(phase) + 1) / 2) * 0.7;
+              return Container(
+                width: barWidth,
+                height: widget.size * normalized,
+                decoration: BoxDecoration(
+                  color: widget.color,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+              );
+            }),
+          );
+        },
       ),
     );
   }
-}
-
-class _WavePainter extends CustomPainter {
-  final double t;
-
-  _WavePainter(this.t);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    const barCount = 7;
-    const barWidth = 3.0;
-    final gap = (size.width - barCount * barWidth) / (barCount - 1);
-
-    final paint = Paint()
-      ..color = AppColors.accentAudio
-      ..strokeCap = StrokeCap.round
-      ..strokeWidth = barWidth
-      ..style = PaintingStyle.stroke;
-
-    for (int i = 0; i < barCount; i++) {
-      final phase = (i / barCount) * math.pi * 2;
-      final wave = math.sin(t * math.pi * 2 + phase);
-      final heightFactor = 0.25 + 0.65 * ((wave + 1) / 2);
-      final h = size.height * heightFactor;
-      final x = i * (barWidth + gap) + barWidth / 2;
-      final yTop = (size.height - h) / 2;
-
-      canvas.drawLine(
-        Offset(x, yTop),
-        Offset(x, yTop + h),
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _WavePainter old) => old.t != t;
 }

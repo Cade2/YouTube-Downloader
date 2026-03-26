@@ -1,74 +1,89 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import '../main.dart';
-import 'format_toggle.dart';
+import '../models/video_info.dart';
 
 class DownloadButton extends StatelessWidget {
-  final MediaFormat format;
-  final VoidCallback? onPressed;
-  final bool isEnabled;
-
   const DownloadButton({
     super.key,
     required this.format,
+    required this.isEnabled,
+    required this.isBusy,
     required this.onPressed,
-    this.isEnabled = true,
   });
+
+  final MediaFormat format;
+  final bool isEnabled;
+  final bool isBusy;
+  final VoidCallback onPressed;
 
   @override
   Widget build(BuildContext context) {
     final isAudio = format == MediaFormat.mp3;
-    final accentColor = isAudio ? AppColors.accentAudio : AppColors.accent;
-    final gradientColors = isAudio
-        ? [const Color(0xFFFFB800), const Color(0xFFFF8C00)]
-        : [const Color(0xFFFF3B3B), const Color(0xFFCC1A1A)];
+    final gradient = isAudio
+        ? const [PullTubeColors.audioAccent, PullTubeColors.audioAccentDeep]
+        : const [PullTubeColors.videoAccent, PullTubeColors.videoAccentDeep];
 
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      height: 58,
-      width: double.infinity,
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(16),
-        gradient: isEnabled
-            ? LinearGradient(colors: gradientColors)
-            : null,
-        color: isEnabled ? null : AppColors.card,
-        boxShadow: isEnabled
-            ? [
-                BoxShadow(
-                  color: accentColor.withOpacity(0.4),
-                  blurRadius: 20,
-                  offset: const Offset(0, 6),
-                  spreadRadius: -4,
-                ),
-              ]
-            : null,
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(16),
-          onTap: isEnabled ? onPressed : null,
-          splashColor: Colors.white.withOpacity(0.1),
-          highlightColor: Colors.black.withOpacity(0.1),
+    final icon = isAudio ? Icons.audio_file_rounded : Icons.download_rounded;
+    final label = isBusy
+        ? 'Downloading...'
+        : isAudio
+        ? 'Download Audio'
+        : 'Download Video';
+
+    return Opacity(
+      opacity: isEnabled ? 1 : 0.45,
+      child: InkWell(
+        onTap: isEnabled ? onPressed : null,
+        borderRadius: BorderRadius.circular(22),
+        child: Ink(
+          height: 62,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: gradient,
+            ),
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(
+                color: gradient.first.withValues(alpha: 0.3),
+                blurRadius: 28,
+                offset: const Offset(0, 18),
+                spreadRadius: -14,
+              ),
+            ],
+          ),
           child: Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Icon(
-                isAudio ? Icons.audio_file_rounded : Icons.download_rounded,
-                color: isEnabled ? Colors.white : AppColors.textMuted,
-                size: 22,
+              Icon(icon, color: Colors.white),
+              const SizedBox(width: 12),
+              Text(
+                label,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
               const SizedBox(width: 10),
-              Text(
-                isAudio ? 'Download MP3' : 'Download MP4',
-                style: GoogleFonts.dmSans(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: isEnabled ? Colors.white : AppColors.textMuted,
-                  letterSpacing: 0.2,
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  format.actionLabel,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ],

@@ -3,124 +3,44 @@ import 'package:shimmer/shimmer.dart';
 
 import '../main.dart';
 
-/// A shimmer placeholder that mimics the video info card while data loads.
 class ShimmerLoader extends StatelessWidget {
   const ShimmerLoader({super.key});
 
   @override
   Widget build(BuildContext context) {
     return Shimmer.fromColors(
-      baseColor: AppColors.card,
-      highlightColor: AppColors.cardElevated,
-      child: Container(
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Thumbnail placeholder
-            AspectRatio(
-              aspectRatio: 16 / 9,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: AppColors.card,
-                  borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(20)),
-                ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Title line 1
-                  _ShimmerBar(width: double.infinity, height: 14),
-                  const SizedBox(height: 8),
-                  // Title line 2
-                  _ShimmerBar(width: 220, height: 14),
-                  const SizedBox(height: 12),
-                  // Channel name
-                  _ShimmerBar(width: 130, height: 12),
-                ],
-              ),
-            ),
-          ],
-        ),
+      baseColor: PullTubeColors.surface,
+      highlightColor: PullTubeColors.surfaceSecondary,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: const [
+          _ShimmerBlock(height: 254, radius: 28),
+          SizedBox(height: 18),
+          _ShimmerBlock(height: 68, radius: 24),
+          SizedBox(height: 16),
+          _ShimmerBlock(height: 116, radius: 24),
+          SizedBox(height: 16),
+          _ShimmerBlock(height: 62, radius: 22),
+        ],
       ),
     );
   }
 }
 
-class _ShimmerBar extends StatelessWidget {
-  final double width;
-  final double height;
+class _ShimmerBlock extends StatelessWidget {
+  const _ShimmerBlock({required this.height, required this.radius});
 
-  const _ShimmerBar({required this.width, required this.height});
+  final double height;
+  final double radius;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: width,
+      width: double.infinity,
       height: height,
       decoration: BoxDecoration(
-        color: AppColors.cardElevated,
-        borderRadius: BorderRadius.circular(6),
-      ),
-    );
-  }
-}
-
-/// Shimmer placeholder for the format toggle + quality dropdown area.
-class ShimmerControls extends StatelessWidget {
-  const ShimmerControls({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Shimmer.fromColors(
-      baseColor: AppColors.card,
-      highlightColor: AppColors.cardElevated,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            height: 52,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Container(
-            height: 12,
-            width: 60,
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(6),
-            ),
-          ),
-          const SizedBox(height: 8),
-          Container(
-            height: 52,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Container(
-            height: 58,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(16),
-            ),
-          ),
-        ],
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(radius),
       ),
     );
   }
