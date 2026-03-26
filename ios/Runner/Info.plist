@@ -2,12 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CADisableMinimumFrameDurationOnPhone</key>
-	<true/>
+	<!-- ─── Bundle identity ─────────────────────────────────────────────── -->
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Pulltube</string>
+	<string>PullTube</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -26,6 +25,26 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+
+	<!-- ─── Privacy / permission usage descriptions ──────────────────────── -->
+
+	<!-- Required to save downloaded videos to the Camera Roll -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>PullTube saves downloaded videos to your photo library.</string>
+
+	<!-- Required on iOS 14+ for add-only access to the photo library -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>PullTube needs permission to add downloaded videos to your photo library.</string>
+
+	<!-- ─── Network access ───────────────────────────────────────────────── -->
+	<!-- YouTube stream URLs use non-standard HTTPS endpoints -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+
+	<!-- ─── Scene / window configuration ─────────────────────────────────── -->
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -47,24 +66,34 @@
 			</array>
 		</dict>
 	</dict>
+
+	<!-- ─── UI ──────────────────────────────────────────────────────────── -->
 	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<false/>
+
+	<!-- Supported orientations — iPhone -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+
+	<!-- Supported orientations — iPad -->
 	<key>UISupportedInterfaceOrientations~ipad</key>
-		<array>
-			<string>UIInterfaceOrientationPortrait</string>
-			<string>UIInterfaceOrientationPortraitUpsideDown</string>
-			<string>UIInterfaceOrientationLandscapeLeft</string>
-			<string>UIInterfaceOrientationLandscapeRight</string>
-		</array>
-		<key>NSPhotoLibraryUsageDescription</key>
-		<string>PullTube needs access to your photo library to save downloaded videos.</string>
-		<key>NSPhotoLibraryAddUsageDescription</key>
-		<string>PullTube needs permission to save videos to your gallery.</string>
-		<key>NSMicrophoneUsageDescription</key>
-		<string>PullTube requires microphone access.</string>
-	</dict>
-	</plist>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>
