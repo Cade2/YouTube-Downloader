@@ -171,17 +171,34 @@ class YouTubeService {
   }
 
   List<StreamOption> _buildVideoOptions(StreamManifest manifest) {
-    final muxed = manifest.muxed
-        .where((s) => s.container == StreamContainer.mp4)
-        .toList()
-      ..sort((a, b) => b.videoQuality.index.compareTo(a.videoQuality.index));
+    // YouTube serves higher resolutions (1080p, 1440p, 4K) only as video-only
+    // streams; muxed streams (video+audio) are capped at ~720p.
+    // Build a map keyed by pixel height so each resolution appears once.
+    // Muxed entries overwrite video-only entries at the same height because
+    // they include an audio track.
+    final byHeight = <int, StreamOption>{};
 
-    // Deduplicate by quality label
-    final seen = <String>{};
-    return muxed
-        .where((s) => seen.add(s.qualityLabel))
-        .map((s) => StreamOption(label: s.qualityLabel, streamInfo: s))
-        .toList();
+    // Pass 1 — video-only MP4 (1080p+); labelled to signal no audio track
+    for (final s in manifest.videoOnly
+        .where((s) => s.container == StreamContainer.mp4)) {
+      final h = s.videoResolution.height;
+      byHeight[h] = StreamOption(
+        label: '${s.qualityLabel} (no audio)',
+        streamInfo: s,
+      );
+    }
+
+    // Pass 2 — muxed MP4 (audio+video, typically ≤720p); overwrite same height
+    for (final s in manifest.muxed
+        .where((s) => s.container == StreamContainer.mp4)) {
+      byHeight[s.videoResolution.height] =
+          StreamOption(label: s.qualityLabel, streamInfo: s);
+    }
+
+    // Sort highest resolution first and return StreamOption list
+    final sorted = byHeight.entries.toList()
+      ..sort((a, b) => b.key.compareTo(a.key));
+    return sorted.map((e) => e.value).toList();
   }
 
   List<StreamOption> _buildAudioOptions(StreamManifest manifest) {
